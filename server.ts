@@ -201,7 +201,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case "send": {
-      const chatId = normalizePhone(args?.chat_id as string);
+      let chatId: string;
+      try {
+        chatId = normalizePhone(args?.chat_id as string);
+      } catch {
+        return {
+          content: [{ type: "text" as const, text: `Invalid phone number: ${args?.chat_id}` }],
+          isError: true,
+        };
+      }
       const text = args?.text as string;
       const mediaUrls = (args?.media_urls as string[] | undefined) || [];
 
@@ -256,7 +264,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "fetch_messages": {
-      const phone = normalizePhone(args?.phone as string);
+      let phone: string;
+      try {
+        phone = normalizePhone(args?.phone as string);
+      } catch {
+        return {
+          content: [{ type: "text" as const, text: `Invalid phone number: ${args?.phone}` }],
+          isError: true,
+        };
+      }
       const limit = (args?.limit as number) || 30;
 
       const messages = fetchMessages(phone, limit);

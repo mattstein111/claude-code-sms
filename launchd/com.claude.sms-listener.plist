@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent for the SMS webhook listener.
+
+  Install:
+    cp launchd/com.claude.sms-listener.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.claude.sms-listener.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.claude.sms-listener.plist
+    rm ~/Library/LaunchAgents/com.claude.sms-listener.plist
+
+  Logs:
+    tail -f /tmp/sms-listener.stdout.log
+    tail -f /tmp/sms-listener.stderr.log
+    Also writes to ~/.claude/channels/sms/logs/listener.log
+
+  Edit WorkingDirectory and ProgramArguments paths to match your setup.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claude.sms-listener</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/matt/.bun/bin/bun</string>
+    <string>run</string>
+    <string>listener.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/matt/Projects/claude-code-sms</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/matt</string>
+    <key>SMS_STATE_DIR</key>
+    <string>/Users/matt/.claude/channels/sms</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/sms-listener.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/sms-listener.stderr.log</string>
+</dict>
+</plist>
