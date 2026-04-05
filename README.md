@@ -95,6 +95,33 @@ Wildcards supported: `+1416*` matches all Toronto 416 numbers.
 
 ---
 
+## Rate Limiting & Retention
+
+### Rate Limiting
+
+The webhook listener enforces per-phone-number rate limits **in memory, before any DB write**. This prevents flooding attacks from exhausting disk space or polluting the database.
+
+| Setting | Env var | Default |
+|---------|---------|---------|
+| Messages per minute per number | `RATE_LIMIT_PER_MINUTE` | 10 |
+| Messages per hour per number | `RATE_LIMIT_PER_HOUR` | 100 |
+
+Rate-limited messages are silently dropped (200 response so the provider doesn't retry). The rate limiter uses a sliding window with zero disk I/O.
+
+### Message Retention
+
+The database is automatically pruned to prevent unbounded growth:
+
+| Message state | Retention | Env var |
+|---------------|-----------|---------|
+| **Delivered** (seen by Claude Code) | 7 days | `RETENTION_DELIVERED_DAYS` |
+| **Blocked** (from blocklisted numbers) | 3 days | `RETENTION_BLOCKED_DAYS` |
+| **Undelivered** (not yet seen) | Never purged | — |
+
+Purge runs on listener startup and every 24 hours. Set to `0` to keep forever.
+
+---
+
 ## Providers
 
 Bring your own phone number from any of these providers:

@@ -28,6 +28,7 @@ import {
   closeDb,
   fetchUndelivered,
   markDelivered,
+  markBlocked,
   insertOutbound,
   fetchMessages,
   getMessage,
@@ -348,9 +349,8 @@ function startPolling(): void {
         const gateResult = gate(row.phone);
 
         if (gateResult.action === "drop") {
-          // Blocked or not allowed — mark delivered so we don't reprocess,
-          // but don't emit notification
-          markDelivered(row.id);
+          // Blocked or not allowed — mark as blocked for retention purge
+          markBlocked(row.id);
           continue;
         }
 

@@ -154,6 +154,50 @@ export function getMessage(id: number): MessageRow | null {
   );
 }
 
+/** Mark a message as blocked (stored for audit, never delivered). */
+export function markBlocked(id: number): void {
+  const db = getDb();
+  db.prepare("UPDATE messages SET delivered = -1 WHERE id = ?").run(id);
+}
+
+/**
+ * Purge old messages based on retention policy.
+ * - Blocked (delivered = -1): delete after blockedDays
+ * - Delivered (delivered = 1): delete after deliveredDays
+ * - Undelivered (delivered = 0): never purge
+ * Returns the number of rows deleted.
+ */
+export function purgeOldMessages(deliveredDays: number, blockedDays: number): number {
+  const db = getDb();
+  let total = 0;
+
+  // Purge old blocked messages
+  if (blockedDays > 0) {
+    const result = db
+      .prepare(
+        `DELETE FROM messages
+         WHERE delivered = -1
+         AND timestamp < datetime('now', '-' || ? || ' days')`
+      )
+      .run(blockedDays);
+    total += result.changes;
+  }
+
+  // Purge old delivered messages
+  if (deliveredDays > 0) {
+    const result = db
+      .prepare(
+        `DELETE FROM messages
+         WHERE delivered = 1
+         AND timestamp < datetime('now', '-' || ? || ' days')`
+      )
+      .run(deliveredDays);
+    total += result.changes;
+  }
+
+  return total;
+}
+
 /** Close the database connection. */
 export function closeDb(): void {
   if (_db) {

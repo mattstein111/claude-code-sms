@@ -10,11 +10,13 @@
  *
  * Responsibilities:
  *   1. Validate webhook authenticity (delegated to provider)
- *   2. Normalize phone numbers
- *   3. Deduplicate on provider message ID
- *   4. Download MMS media to local storage
- *   5. Write message row to SQLite
- *   6. Log everything to logs/listener.log
+ *   2. Rate-limit per phone number (in-memory, before DB write)
+ *   3. Normalize phone numbers
+ *   4. Deduplicate on provider message ID
+ *   5. Download MMS media to local storage
+ *   6. Write message row to SQLite
+ *   7. Purge old messages on startup and daily
+ *   8. Log everything to logs/listener.log
  *
  * Usage: bun run listener.ts
  * Config: ~/.claude/channels/sms/.env
@@ -23,8 +25,9 @@
 import { join } from "path";
 import { mkdirSync, appendFileSync, existsSync } from "fs";
 import { normalizePhone } from "./phone";
-import { getDb, insertInbound, closeDb } from "./db";
+import { getDb, insertInbound, closeDb, purgeOldMessages } from "./db";
 import { getProvider } from "./providers/index";
+import { checkRateLimit, cleanupStaleWindows } from "./ratelimit";
 import type { InboundMessage } from "./providers/interface";
 
 // --- Configuration ---
@@ -52,6 +55,14 @@ const LISTEN_PORT = parseInt(process.env.LISTEN_PORT || "5090", 10);
 const MEDIA_DIR = join(STATE_DIR, "media");
 const LOG_DIR = join(STATE_DIR, "logs");
 const LOG_PATH = join(LOG_DIR, "listener.log");
+
+// Rate limiting
+const RATE_LIMIT_PER_MINUTE = parseInt(process.env.RATE_LIMIT_PER_MINUTE || "10", 10);
+const RATE_LIMIT_PER_HOUR = parseInt(process.env.RATE_LIMIT_PER_HOUR || "100", 10);
+
+// Retention (days). 0 = keep forever.
+const RETENTION_DELIVERED_DAYS = parseInt(process.env.RETENTION_DELIVERED_DAYS || "7", 10);
+const RETENTION_BLOCKED_DAYS = parseInt(process.env.RETENTION_BLOCKED_DAYS || "3", 10);
 
 // Ensure directories exist
 mkdirSync(MEDIA_DIR, { recursive: true });
@@ -97,7 +108,6 @@ async function downloadMedia(
 
       const contentType = resp.headers.get("content-type") || "application/octet-stream";
       const ext = contentType.split("/").pop()?.split(";")[0] || "bin";
-      // Sanitize messageId for use in filenames
       const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
       const filename = `${safeId}_${i}.${ext}`;
       const filePath = join(MEDIA_DIR, filename);
@@ -115,14 +125,45 @@ async function downloadMedia(
   return localPaths;
 }
 
-// --- Initialize DB ---
+// --- Initialize DB and run startup purge ---
 
 getDb();
+
+const purged = purgeOldMessages(RETENTION_DELIVERED_DAYS, RETENTION_BLOCKED_DAYS);
+if (purged > 0) {
+  log("info", "Startup purge", {
+    deleted: purged,
+    deliveredDays: RETENTION_DELIVERED_DAYS,
+    blockedDays: RETENTION_BLOCKED_DAYS,
+  });
+}
+
 log("info", "Webhook listener starting", {
   port: LISTEN_PORT,
   path: WEBHOOK_PATH,
   provider: provider.name,
+  rateLimitPerMinute: RATE_LIMIT_PER_MINUTE,
+  rateLimitPerHour: RATE_LIMIT_PER_HOUR,
+  retentionDeliveredDays: RETENTION_DELIVERED_DAYS,
+  retentionBlockedDays: RETENTION_BLOCKED_DAYS,
 });
+
+// --- Periodic maintenance ---
+
+// Purge old messages daily
+setInterval(() => {
+  try {
+    const deleted = purgeOldMessages(RETENTION_DELIVERED_DAYS, RETENTION_BLOCKED_DAYS);
+    if (deleted > 0) {
+      log("info", "Periodic purge", { deleted });
+    }
+  } catch (err) {
+    log("error", "Purge failed", { error: String(err) });
+  }
+}, 24 * 60 * 60 * 1000);
+
+// Clean up stale rate limiter windows every 10 minutes
+setInterval(cleanupStaleWindows, 10 * 60 * 1000);
 
 // --- HTTP Server ---
 
@@ -152,7 +193,6 @@ const server = Bun.serve({
     }
 
     // Delegate parsing and validation to the provider
-    // Clone the request so the provider can read the body
     let inbound: InboundMessage | null;
     try {
       inbound = await provider.parseWebhook(req);
@@ -168,9 +208,15 @@ const server = Bun.serve({
       return new Response("unauthorized", { status: 401 });
     }
 
+    // Rate limit check — before any DB write
+    const phone = normalizePhone(inbound.from);
+    if (!checkRateLimit(phone, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR)) {
+      log("warn", "Rate limited", { phone });
+      return new Response("ok", { status: 200 }); // 200 so provider doesn't retry
+    }
+
     // Return 200 immediately — most providers don't retry
-    // Process asynchronously
-    processInbound(inbound).catch((err) => {
+    processInbound(inbound, phone).catch((err) => {
       log("error", "Webhook processing error", { error: String(err) });
     });
 
@@ -178,9 +224,7 @@ const server = Bun.serve({
   },
 });
 
-async function processInbound(msg: InboundMessage): Promise<void> {
-  const phone = normalizePhone(msg.from);
-
+async function processInbound(msg: InboundMessage, phone: string): Promise<void> {
   log("info", "Inbound message", {
     from: phone,
     to: msg.to,

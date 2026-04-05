@@ -27,6 +27,12 @@ Writes configuration to `~/.claude/channels/sms/.env` (chmod 600). This file is 
 
 - **SMS_PROVIDER** — one of: `voipms`, `twilio`, `vonage`, `telnyx`, `plivo`
 - **OWNER_PHONE** — the owner's personal phone number in E.164 format (+1XXXXXXXXXX). This number gets full trust and permission relay.
+
+### Optional tuning (have sensible defaults — only ask if user wants to customize):
+- **RATE_LIMIT_PER_MINUTE** — max inbound messages per phone per minute (default: 10)
+- **RATE_LIMIT_PER_HOUR** — max inbound messages per phone per hour (default: 100)
+- **RETENTION_DELIVERED_DAYS** — days to keep delivered messages (default: 7, 0 = forever)
+- **RETENTION_BLOCKED_DAYS** — days to keep blocked messages (default: 3, 0 = forever)
 - **SMS_WEBHOOK_TOKEN** — a secret token for webhook URL validation. Generate a random one if the user doesn't have one: `openssl rand -hex 24`
 - **SMS_WEBHOOK_PATH** — the URL path for the webhook endpoint (default: `/incoming`). Should be obscured, e.g. `/sms-abc123/incoming`
 - **LISTEN_PORT** — port for the webhook listener (default: `5090`)

@@ -39,8 +39,17 @@ All state lives under `~/.claude/channels/sms/`:
 - All stdout is reserved for MCP protocol — debug logging goes to stderr
 - Owner phone (in `.env`) has full trust including permission relay
 - All other numbers are untrusted — messages delivered with E.164 phone only
-- Blocklisted numbers are stored in DB for audit but never delivered to Claude Code
+- Blocklisted numbers are stored in DB (`delivered = -1`) but never delivered to Claude Code
 - Allowlist/blocklist support glob wildcards (e.g. `+1416*`)
+
+## Rate limiting & retention
+
+- In-memory rate limiter in the listener (per phone, sliding window, before DB write)
+- Defaults: 10/min, 100/hour per number. Configurable via `RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_PER_HOUR`
+- Delivered messages purged after 7 days, blocked after 3 days, undelivered never purged
+- Configurable via `RETENTION_DELIVERED_DAYS`, `RETENTION_BLOCKED_DAYS`
+- Purge runs on listener startup + daily
+- `delivered` column: `0` = undelivered, `1` = delivered, `-1` = blocked
 
 ## Tools exposed
 
