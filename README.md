@@ -14,13 +14,31 @@ A [Claude Code channel plugin](https://docs.anthropic.com/en/docs/claude-code) t
 
 ## How It Works
 
-```
-You text +1 (647) 483-7416          Claude Code sees your message
-        |                                      |
-        v                                      v
-  SMS Provider ──webhook──> Listener ──db──> MCP Server ──notify──> Claude
-                                                                      |
-  You get a reply  <──sms──  Provider  <──api──  send tool  <─────────┘
+```mermaid
+flowchart LR
+    Phone["Your Phone"]
+    Provider["SMS Provider"]
+    Tunnel["Cloudflare Tunnel"]
+    Listener["Webhook Listener<br/><i>always on</i>"]
+    DB[("SQLite DB")]
+    MCP["MCP Server<br/><i>runs with Claude</i>"]
+    Claude["Claude Code"]
+
+    Phone -- "SMS" --> Provider
+    Provider -- "webhook" --> Tunnel
+    Tunnel --> Listener
+    Listener -- "write" --> DB
+    DB -- "poll 1.5s" --> MCP
+    MCP -- "notification" --> Claude
+    Claude -- "send tool" --> MCP
+    MCP -- "API" --> Provider
+    Provider -- "SMS" --> Phone
+
+    style Phone fill:#10B981,color:#fff,stroke:none
+    style Claude fill:#7C3AED,color:#fff,stroke:none
+    style DB fill:#F59E0B,color:#fff,stroke:none
+    style Listener fill:#3B82F6,color:#fff,stroke:none
+    style MCP fill:#3B82F6,color:#fff,stroke:none
 ```
 
 Two processes, one database:
@@ -36,7 +54,35 @@ Two processes, one database:
 
 ## Trust Model
 
-Every phone number falls into one of three tiers:
+```mermaid
+flowchart TD
+    Inbound["Inbound SMS"]
+    TokenCheck{"Valid webhook\ntoken?"}
+    BlockCheck{"On blocklist?"}
+    OwnerCheck{"Owner phone?"}
+    AllowCheck{"On allowlist?"}
+    Reject["Reject (401)"]
+    Drop["Store in DB\n<i>never deliver</i>"]
+    Owner["Deliver to Claude\n<b>owner: true</b>"]
+    Untrusted["Deliver to Claude\n<i>untrusted</i>"]
+    Unknown["Drop silently"]
+
+    Inbound --> TokenCheck
+    TokenCheck -- "No" --> Reject
+    TokenCheck -- "Yes" --> BlockCheck
+    BlockCheck -- "Yes" --> Drop
+    BlockCheck -- "No" --> OwnerCheck
+    OwnerCheck -- "Yes" --> Owner
+    OwnerCheck -- "No" --> AllowCheck
+    AllowCheck -- "Yes" --> Untrusted
+    AllowCheck -- "No" --> Unknown
+
+    style Reject fill:#EF4444,color:#fff,stroke:none
+    style Drop fill:#EF4444,color:#fff,stroke:none
+    style Unknown fill:#6B7280,color:#fff,stroke:none
+    style Owner fill:#10B981,color:#fff,stroke:none
+    style Untrusted fill:#F59E0B,color:#fff,stroke:none
+```
 
 | | Owner | Allowlisted | Blocked |
 |---|---|---|---|
@@ -248,14 +294,20 @@ message_id: "42"                     # required — DB message ID
 
 Approve or deny Claude Code tool calls from your phone:
 
-```
-                           ┌──────────────────────────────────────────────┐
-Claude wants to run        │  [Permission] Claude wants to: Run npm      │
-  Bash: npm install   ──>  │  install. Reply "yes abcde" or "no abcde"  │
-                           └──────────────────────────────────────────────┘
-                                              your phone
+```mermaid
+sequenceDiagram
+    participant C as Claude Code
+    participant M as MCP Server
+    participant P as SMS Provider
+    participant O as Owner's Phone
 
-You reply: "yes abcde"  ──>  Claude proceeds with npm install
+    C->>M: Permission request<br/>"Bash: npm install"
+    M->>P: sendSMS
+    P->>O: [Permission] Claude wants to:<br/>Run npm install.<br/>Reply "yes abcde" or "no abcde"
+    O->>P: "yes abcde"
+    P->>M: webhook
+    M->>C: permission: allow
+    Note over C: Proceeds with<br/>npm install
 ```
 
 Only the owner phone can approve permissions. Replies from other numbers are silently ignored.
