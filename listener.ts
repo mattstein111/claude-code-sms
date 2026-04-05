@@ -46,9 +46,18 @@ await loadEnv();
 const WEBHOOK_PATH = process.env.SMS_WEBHOOK_PATH || "/incoming";
 const LISTEN_PORT = parseInt(process.env.LISTEN_PORT || "5090", 10);
 const LISTEN_HOST = process.env.LISTEN_HOST || "127.0.0.1";
+const TLS_CERT_PATH = process.env.TLS_CERT_PATH || "";
+const TLS_KEY_PATH = process.env.TLS_KEY_PATH || "";
 const MEDIA_DIR = join(STATE_DIR, "media");
 const LOG_DIR = join(STATE_DIR, "logs");
 const LOG_PATH = join(LOG_DIR, "listener.log");
+
+// Validate TLS config — both or neither
+if ((TLS_CERT_PATH && !TLS_KEY_PATH) || (!TLS_CERT_PATH && TLS_KEY_PATH)) {
+  console.error("FATAL: Both TLS_CERT_PATH and TLS_KEY_PATH must be set, or neither.");
+  process.exit(1);
+}
+const TLS_ENABLED = !!(TLS_CERT_PATH && TLS_KEY_PATH);
 
 // Request limits
 const MAX_REQUEST_BODY_SIZE = 1 * 1024 * 1024; // 1MB
@@ -213,7 +222,7 @@ setInterval(cleanupStaleWindows, 10 * 60 * 1000);
 
 // --- HTTP Server ---
 
-const server = Bun.serve({
+const serverOptions: Parameters<typeof Bun.serve>[0] = {
   port: LISTEN_PORT,
   hostname: LISTEN_HOST,
 
@@ -288,7 +297,17 @@ const server = Bun.serve({
 
     return new Response("ok", { status: 200 });
   },
-});
+};
+
+// Enable TLS if cert and key are configured
+if (TLS_ENABLED) {
+  serverOptions.tls = {
+    cert: Bun.file(TLS_CERT_PATH),
+    key: Bun.file(TLS_KEY_PATH),
+  };
+}
+
+const server = Bun.serve(serverOptions);
 
 async function processInbound(msg: InboundMessage, phone: string): Promise<void> {
   log("info", "Inbound message", {
@@ -358,10 +377,12 @@ function shutdown() {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
+const proto = TLS_ENABLED ? "https" : "http";
 log("info", "Webhook listener ready", {
   host: LISTEN_HOST,
   port: LISTEN_PORT,
   path: WEBHOOK_PATH,
   provider: provider.name,
+  tls: TLS_ENABLED,
 });
-console.log(`SMS webhook listener running on ${LISTEN_HOST}:${LISTEN_PORT} (provider: ${provider.name})`);
+console.log(`SMS webhook listener running on ${proto}://${LISTEN_HOST}:${LISTEN_PORT} (provider: ${provider.name}${TLS_ENABLED ? ", TLS enabled" : ""})`);
