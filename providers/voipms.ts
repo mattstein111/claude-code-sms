@@ -46,7 +46,8 @@ async function apiCall(params: Record<string, string>): Promise<Record<string, u
 
   const resp = await fetch(url.toString());
   if (!resp.ok) {
-    throw new Error(`voip.ms API HTTP ${resp.status}: ${resp.statusText}`);
+    // Never include URL in error (contains API credentials as query params)
+    throw new Error(`voip.ms API error: HTTP ${resp.status}`);
   }
 
   const data = (await resp.json()) as Record<string, unknown>;

@@ -167,7 +167,7 @@ export const telnyxProvider: SmsProvider = {
       }
     }
 
-    const body = JSON.parse(rawBody) as {
+    let body: {
       data?: {
         event_type?: string;
         payload?: {
@@ -179,6 +179,12 @@ export const telnyxProvider: SmsProvider = {
         };
       };
     };
+
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      return null; // malformed JSON
+    }
 
     const payload = body.data?.payload;
     if (!payload) return null;

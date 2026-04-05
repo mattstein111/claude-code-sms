@@ -55,13 +55,20 @@ export function writeAccess(config: AccessConfig): void {
   renameSync(tmpPath, ACCESS_PATH);
 }
 
-/** Match a phone number against a pattern that may contain wildcards. */
+/**
+ * Match a phone number against a pattern with optional trailing wildcard.
+ * Supports exact match ("+ 14165551234") and prefix match ("+1416*").
+ * No regex — immune to ReDoS.
+ */
 function matchPattern(phone: string, pattern: string): boolean {
-  // Convert glob pattern to regex: * becomes .*
-  const regex = new RegExp(
-    "^" + pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$"
-  );
-  return regex.test(phone);
+  if (!pattern.includes("*")) {
+    return phone === pattern; // exact match
+  }
+
+  // Only trailing wildcard is supported: "+1416*" matches "+14165551234"
+  // Multiple wildcards or mid-string wildcards are treated as trailing at first *
+  const prefix = pattern.slice(0, pattern.indexOf("*"));
+  return phone.startsWith(prefix);
 }
 
 /** Check if a phone number matches any pattern in a list. */

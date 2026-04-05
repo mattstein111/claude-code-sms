@@ -50,6 +50,12 @@ export const vonageProvider: SmsProvider = {
     if (missing.length > 0) {
       throw new Error(`Vonage: missing env vars: ${missing.join(", ")}`);
     }
+    // At least one form of webhook authentication is required
+    if (!process.env.VONAGE_SIGNATURE_SECRET && !process.env.SMS_WEBHOOK_TOKEN) {
+      throw new Error(
+        "Vonage: at least one of VONAGE_SIGNATURE_SECRET or SMS_WEBHOOK_TOKEN must be set for webhook authentication"
+      );
+    }
   },
 
   async sendSMS(to: string, message: string): Promise<SendResult> {

@@ -273,7 +273,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           isError: true,
         };
       }
-      const limit = (args?.limit as number) || 30;
+      const limit = Math.min(Math.max(1, (args?.limit as number) || 30), 200);
 
       const messages = fetchMessages(phone, limit);
       const formatted = messages.map((m) => ({
@@ -298,6 +298,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "download_attachment": {
       const messageId = parseInt(args?.message_id as string, 10);
+      const chatId2 = args?.chat_id as string | undefined;
       const msg = getMessage(messageId);
 
       if (!msg) {
@@ -307,6 +308,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
           isError: true,
         };
+      }
+
+      // Access scoping: if chat_id provided, verify message belongs to that conversation
+      if (chatId2) {
+        try {
+          const scopedPhone = normalizePhone(chatId2);
+          if (msg.phone !== scopedPhone) {
+            return {
+              content: [
+                { type: "text" as const, text: `Message ${messageId} does not belong to ${scopedPhone}` },
+              ],
+              isError: true,
+            };
+          }
+        } catch { /* invalid phone — skip scoping */ }
       }
 
       if (!msg.media) {
@@ -350,6 +366,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 
+// Track processed permission request IDs to prevent replay
+const processedPermissionIds = new Set<string>();
+
 function startPolling(): void {
   getDb();
 
@@ -360,14 +379,13 @@ function startPolling(): void {
   pollInterval = setInterval(() => {
     try {
       const rows = fetchUndeliveredForSession(SESSION_ID, SUBSCRIBE_DIDS);
-      const deliveredIds: number[] = [];
 
       for (const row of rows) {
         const gateResult = gate(row.phone);
 
         if (gateResult.action === "drop") {
           markBlocked(row.id);
-          deliveredIds.push(row.id); // Track so we don't reprocess
+          recordDeliveryBatch(SESSION_ID, [row.id]);
           continue;
         }
 
@@ -375,16 +393,23 @@ function startPolling(): void {
         if (gateResult.trust === "owner") {
           const permMatch = PERMISSION_REPLY_RE.exec(row.message);
           if (permMatch) {
-            server.notification({
-              method: "notifications/claude/channel/permission",
-              params: {
-                request_id: permMatch[2].toLowerCase(),
-                behavior: permMatch[1].toLowerCase().startsWith("y")
-                  ? "allow"
-                  : "deny",
-              },
-            });
-            deliveredIds.push(row.id);
+            const requestId = permMatch[2].toLowerCase();
+
+            // Prevent replay of already-processed permission replies
+            if (!processedPermissionIds.has(requestId)) {
+              processedPermissionIds.add(requestId);
+              server.notification({
+                method: "notifications/claude/channel/permission",
+                params: {
+                  request_id: requestId,
+                  behavior: permMatch[1].toLowerCase().startsWith("y")
+                    ? "allow"
+                    : "deny",
+                },
+              });
+            }
+
+            recordDeliveryBatch(SESSION_ID, [row.id]);
             continue;
           }
         }
@@ -419,13 +444,9 @@ function startPolling(): void {
           params: { content: row.message || "(attachment)", meta },
         });
 
-        deliveredIds.push(row.id);
+        // Record delivery immediately after notification — prevents replay on crash
+        recordDeliveryBatch(SESSION_ID, [row.id]);
         log(`Delivered message ${row.id} from ${row.phone}`);
-      }
-
-      // Batch record all deliveries
-      if (deliveredIds.length > 0) {
-        recordDeliveryBatch(SESSION_ID, deliveredIds);
       }
     } catch (err) {
       log(`Polling error: ${err}`);

@@ -26,6 +26,7 @@
 
 import { join } from "path";
 import { mkdirSync, appendFileSync, chmodSync } from "fs";
+import { resolve as dnsResolve } from "dns/promises";
 import { normalizePhone } from "./phone";
 import { getDb, insertInbound, closeDb, purgeOldMessages } from "./db";
 import { getProvider } from "./providers/index";
@@ -104,21 +105,68 @@ const MAX_MEDIA_SIZE = 10 * 1024 * 1024; // 10MB per file
 const MAX_MEDIA_PER_MESSAGE = 10;
 
 /**
- * Validate a media URL is safe to fetch (SSRF protection).
- * Blocks private/reserved IP ranges and non-HTTP protocols.
+ * Check if an IP address is private/reserved.
+ * Covers IPv4, IPv6, mapped IPv6 (::ffff:), and special addresses.
  */
-function isAllowedMediaUrl(rawUrl: string): boolean {
+function isPrivateIp(ip: string): boolean {
+  // Normalize: strip brackets from IPv6
+  const addr = ip.replace(/^\[|\]$/g, "").toLowerCase();
+
+  // IPv4-mapped IPv6 (::ffff:127.0.0.1)
+  if (addr.startsWith("::ffff:")) {
+    return isPrivateIp(addr.slice(7));
+  }
+
+  // IPv6 private ranges
+  if (addr === "::1" || addr === "::") return true;
+  if (addr.startsWith("fc") || addr.startsWith("fd")) return true; // fc00::/7
+  if (addr.startsWith("fe80")) return true; // link-local
+
+  // IPv4
+  if (addr === "0.0.0.0") return true;
+  if (addr === "127.0.0.1" || addr.startsWith("127.")) return true;
+  if (addr.startsWith("10.")) return true;
+  if (addr.startsWith("192.168.")) return true;
+  if (addr.startsWith("169.254.")) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) return true;
+
+  return false;
+}
+
+/**
+ * Validate a media URL is safe to fetch (SSRF protection).
+ * Checks protocol, hostname blocklist, and DNS resolution.
+ * Defends against DNS rebinding by resolving the hostname before allowing fetch.
+ */
+async function isAllowedMediaUrl(rawUrl: string): Promise<boolean> {
   try {
     const parsed = new URL(rawUrl);
     if (!["http:", "https:"].includes(parsed.protocol)) return false;
-    const host = parsed.hostname.toLowerCase();
-    if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]") return false;
-    if (host.startsWith("10.")) return false;
-    if (host.startsWith("192.168.")) return false;
-    if (host.startsWith("169.254.")) return false;
-    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false;
+
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+
+    // Block obvious private hostnames
+    if (host === "localhost" || host === "0.0.0.0") return false;
     if (host.endsWith(".local") || host.endsWith(".internal")) return false;
     if (host === "metadata.google.internal") return false;
+
+    // Check if host is a raw IP address
+    if (isPrivateIp(host)) return false;
+
+    // Block decimal (2130706433) and hex (0x7f000001) IP encodings
+    if (/^\d+$/.test(host) || /^0x[0-9a-f]+$/i.test(host)) return false;
+
+    // Resolve hostname to IPs and check each one (defeats DNS rebinding)
+    try {
+      const addresses = await dnsResolve(host);
+      for (const addr of addresses) {
+        if (isPrivateIp(addr)) return false;
+      }
+    } catch {
+      // DNS resolution failed — block the request
+      return false;
+    }
+
     return true;
   } catch {
     return false;
@@ -136,7 +184,7 @@ async function downloadMedia(
     const url = urls[i].trim();
     if (!url) continue;
 
-    if (!isAllowedMediaUrl(url)) {
+    if (!(await isAllowedMediaUrl(url))) {
       log("warn", "Blocked media URL (SSRF protection)", { url });
       continue;
     }
@@ -253,16 +301,34 @@ const serverOptions: Parameters<typeof Bun.serve>[0] = {
       return new Response("too many requests", { status: 429 });
     }
 
-    // Request body size limit — reject before reading
+    // Request body size limit — enforced for both Content-Length and chunked encoding
     const contentLength = parseInt(req.headers.get("content-length") || "0", 10);
     if (contentLength > MAX_REQUEST_BODY_SIZE) {
       return new Response("payload too large", { status: 413 });
     }
 
+    // Read body with size cap to prevent chunked encoding bypass
+    let bodyBytes: ArrayBuffer;
+    try {
+      bodyBytes = await req.arrayBuffer();
+    } catch {
+      return new Response("bad request", { status: 400 });
+    }
+    if (bodyBytes.byteLength > MAX_REQUEST_BODY_SIZE) {
+      return new Response("payload too large", { status: 413 });
+    }
+
+    // Reconstruct request with the already-read body for the provider
+    const safeReq = new Request(req.url, {
+      method: req.method,
+      headers: req.headers,
+      body: bodyBytes.byteLength > 0 ? bodyBytes : undefined,
+    });
+
     // Delegate parsing and validation to the provider
     let inbound: InboundMessage | null;
     try {
-      inbound = await provider.parseWebhook(req);
+      inbound = await provider.parseWebhook(safeReq);
     } catch (err) {
       log("error", "Webhook parse error", { error: String(err) });
       return new Response("bad request", { status: 400 });

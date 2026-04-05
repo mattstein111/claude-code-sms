@@ -149,7 +149,14 @@ export const twilioProvider: SmsProvider = {
     const signature = req.headers.get("x-twilio-signature");
     if (!signature) return null;
 
-    const requestUrl = new URL(req.url).toString();
+    // Use WEBHOOK_BASE_URL if set (required behind a proxy/tunnel),
+    // otherwise fall back to req.url (works when listener is directly exposed)
+    const baseUrl = process.env.WEBHOOK_BASE_URL;
+    const localUrl = new URL(req.url);
+    const requestUrl = baseUrl
+      ? `${baseUrl.replace(/\/$/, "")}${localUrl.pathname}${localUrl.search}`
+      : localUrl.toString();
+
     if (!validateSignature(config.authToken, signature, requestUrl, params)) {
       return null;
     }
@@ -157,8 +164,7 @@ export const twilioProvider: SmsProvider = {
     // Optional extra token in query string (defense in depth)
     const webhookToken = process.env.SMS_WEBHOOK_TOKEN;
     if (webhookToken) {
-      const url = new URL(req.url);
-      const token = url.searchParams.get("token");
+      const token = localUrl.searchParams.get("token");
       if (!constantTimeEquals(token, webhookToken)) return null;
     }
 

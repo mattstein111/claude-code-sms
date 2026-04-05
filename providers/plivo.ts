@@ -54,6 +54,12 @@ export const plivoProvider: SmsProvider = {
     if (missing.length > 0) {
       throw new Error(`Plivo: missing env vars: ${missing.join(", ")}`);
     }
+    // At least one form of webhook authentication is required
+    if (!process.env.PLIVO_SIGNATURE_V3_TOKEN && !process.env.SMS_WEBHOOK_TOKEN) {
+      throw new Error(
+        "Plivo: at least one of PLIVO_SIGNATURE_V3_TOKEN or SMS_WEBHOOK_TOKEN must be set for webhook authentication"
+      );
+    }
   },
 
   async sendSMS(to: string, message: string): Promise<SendResult> {
@@ -134,7 +140,12 @@ export const plivoProvider: SmsProvider = {
       const nonce = req.headers.get("x-plivo-signature-v3-nonce");
       if (!signature || !nonce) return null; // reject unsigned
 
-      const requestUrl = new URL(req.url).toString();
+      // Use WEBHOOK_BASE_URL if set (required behind a proxy/tunnel)
+      const baseUrl = process.env.WEBHOOK_BASE_URL;
+      const localUrl = new URL(req.url);
+      const requestUrl = baseUrl
+        ? `${baseUrl.replace(/\/$/, "")}${localUrl.pathname}${localUrl.search}`
+        : localUrl.toString();
       const dataToSign = requestUrl + nonce + rawBody;
       const expected = createHmac("sha256", config.signatureToken)
         .update(dataToSign)
@@ -146,7 +157,11 @@ export const plivoProvider: SmsProvider = {
     let params: Record<string, unknown>;
 
     if (contentType.includes("application/json")) {
-      params = JSON.parse(rawBody) as Record<string, unknown>;
+      try {
+        params = JSON.parse(rawBody) as Record<string, unknown>;
+      } catch {
+        return null; // malformed JSON
+      }
     } else {
       params = Object.fromEntries(new URLSearchParams(rawBody));
     }

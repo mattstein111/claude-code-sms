@@ -336,25 +336,19 @@ export function purgeOldMessages(
 
   // 1. Purge blocked messages older than blockedDays
   if (blockedDays > 0) {
+    const cutoff = new Date(Date.now() - blockedDays * 24 * 60 * 60 * 1000).toISOString();
     const result = db
-      .prepare(
-        `DELETE FROM messages
-         WHERE blocked = 1
-         AND timestamp < datetime('now', '-' || ? || ' days')`
-      )
-      .run(blockedDays);
+      .prepare("DELETE FROM messages WHERE blocked = 1 AND timestamp < ?")
+      .run(cutoff);
     total += result.changes;
   }
 
   // 2. Purge messages older than maxDays
   if (maxDays > 0) {
+    const cutoff = new Date(Date.now() - maxDays * 24 * 60 * 60 * 1000).toISOString();
     const result = db
-      .prepare(
-        `DELETE FROM messages
-         WHERE blocked = 0
-         AND timestamp < datetime('now', '-' || ? || ' days')`
-      )
-      .run(maxDays);
+      .prepare("DELETE FROM messages WHERE blocked = 0 AND timestamp < ?")
+      .run(cutoff);
     total += result.changes;
   }
 
@@ -383,21 +377,24 @@ export function purgeOldMessages(
   }
 
   // 4. Clean up stale sessions (inactive for over 7 days)
+  const sessionCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   db.run(
     `DELETE FROM deliveries WHERE session_id IN (
        SELECT session_id FROM sessions
-       WHERE active = 0 AND last_poll < datetime('now', '-7 days')
-     )`
+       WHERE active = 0 AND last_poll < ?
+     )`,
+    sessionCutoff
   );
   db.run(
-    `DELETE FROM sessions
-     WHERE active = 0 AND last_poll < datetime('now', '-7 days')`
+    "DELETE FROM sessions WHERE active = 0 AND last_poll < ?",
+    sessionCutoff
   );
 
   // 5. Mark crashed sessions as inactive (no poll in over 1 hour)
+  const staleCutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   db.run(
-    `UPDATE sessions SET active = 0
-     WHERE last_poll < datetime('now', '-1 hour') AND active = 1`
+    "UPDATE sessions SET active = 0 WHERE last_poll < ? AND active = 1",
+    staleCutoff
   );
 
   // 6. Clean up delivery records for purged messages
