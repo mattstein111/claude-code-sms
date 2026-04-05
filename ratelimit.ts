@@ -1,35 +1,27 @@
 /**
- * In-memory sliding window rate limiter.
+ * In-memory rate limiting.
  *
- * Tracks message timestamps per phone number. Checks are O(1) amortized —
- * old entries are pruned lazily on each check. No DB access, no disk I/O.
+ * Two layers:
+ *   1. Per-phone sliding window — tracks message timestamps per number
+ *   2. Global requests-per-second — caps total inbound request rate
  *
- * Used by the webhook listener to drop floods before they hit SQLite.
+ * Both operate entirely in memory with no disk I/O.
+ * The per-phone map has a hard cap to prevent memory exhaustion
+ * from attackers spoofing many unique numbers.
  */
+
+// --- Per-phone rate limiter ---
 
 interface Window {
   timestamps: number[];
 }
 
 const windows = new Map<string, Window>();
-
-/** Prune timestamps older than `maxAgeMs` from the window. */
-function prune(window: Window, maxAgeMs: number, now: number): void {
-  const cutoff = now - maxAgeMs;
-  // Find first index that's within the window
-  let i = 0;
-  while (i < window.timestamps.length && window.timestamps[i] < cutoff) {
-    i++;
-  }
-  if (i > 0) {
-    window.timestamps.splice(0, i);
-  }
-}
+const MAX_TRACKED_PHONES = 10000;
 
 /**
  * Check if a message from this phone should be allowed.
  * Returns true if allowed, false if rate-limited.
- *
  * Automatically records the timestamp if allowed.
  */
 export function checkRateLimit(
@@ -41,34 +33,41 @@ export function checkRateLimit(
 
   let window = windows.get(phone);
   if (!window) {
+    // Hard cap on tracked phones to prevent memory exhaustion
+    if (windows.size >= MAX_TRACKED_PHONES) {
+      return false; // reject when map is full — safe default
+    }
     window = { timestamps: [] };
     windows.set(phone, window);
   }
 
   // Prune entries older than 1 hour
-  prune(window, 60 * 60 * 1000, now);
+  const cutoff = now - 60 * 60 * 1000;
+  let i = 0;
+  while (i < window.timestamps.length && window.timestamps[i] < cutoff) {
+    i++;
+  }
+  if (i > 0) window.timestamps.splice(0, i);
 
-  // Count messages in the last minute
+  // Per-minute check
   const oneMinuteAgo = now - 60 * 1000;
   const lastMinuteCount = window.timestamps.filter((t) => t >= oneMinuteAgo).length;
   if (lastMinuteCount >= perMinute) {
     return false;
   }
 
-  // Count messages in the last hour (already pruned to 1 hour)
+  // Per-hour check
   if (window.timestamps.length >= perHour) {
     return false;
   }
 
-  // Allowed — record this message
   window.timestamps.push(now);
   return true;
 }
 
 /**
- * Periodically clean up windows for phones that haven't sent
- * anything in over an hour. Call this on a timer to prevent
- * unbounded memory growth from many unique numbers.
+ * Clean up windows for phones that haven't sent anything in over an hour.
+ * Call on a timer to reclaim memory.
  */
 export function cleanupStaleWindows(): void {
   const cutoff = Date.now() - 60 * 60 * 1000;
@@ -80,4 +79,37 @@ export function cleanupStaleWindows(): void {
       windows.delete(phone);
     }
   }
+}
+
+// --- Global rate limiter ---
+
+let globalTokens: number = 0;
+let globalLastRefill: number = 0;
+let globalMaxTokens: number = 50;
+let globalRefillRate: number = 50; // tokens per second
+
+/**
+ * Initialize the global rate limiter.
+ * @param maxRequestsPerSecond — max sustained requests per second
+ */
+export function initGlobalRateLimit(maxRequestsPerSecond: number): void {
+  globalMaxTokens = maxRequestsPerSecond;
+  globalRefillRate = maxRequestsPerSecond;
+  globalTokens = maxRequestsPerSecond;
+  globalLastRefill = Date.now();
+}
+
+/**
+ * Check if the global rate limit allows a request.
+ * Uses a token bucket algorithm — smooth and burst-tolerant.
+ */
+export function checkGlobalRateLimit(): boolean {
+  const now = Date.now();
+  const elapsed = (now - globalLastRefill) / 1000;
+  globalTokens = Math.min(globalMaxTokens, globalTokens + elapsed * globalRefillRate);
+  globalLastRefill = now;
+
+  if (globalTokens < 1) return false;
+  globalTokens -= 1;
+  return true;
 }

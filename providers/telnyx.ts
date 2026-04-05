@@ -158,6 +158,10 @@ export const telnyxProvider: SmsProvider = {
       const timestamp = req.headers.get("telnyx-timestamp");
       if (!signature || !timestamp) return null; // reject unsigned
 
+      // Replay protection — reject webhooks older than 5 minutes
+      const webhookAge = Date.now() / 1000 - Number(timestamp);
+      if (isNaN(webhookAge) || Math.abs(webhookAge) > 300) return null;
+
       if (!verifyTelnyxSignature(config.publicKey, signature, timestamp, rawBody)) {
         return null;
       }

@@ -8,26 +8,34 @@
  * Provider-agnostic: uses the SmsProvider interface to parse webhooks
  * and fetch media. The active provider is set via SMS_PROVIDER env var.
  *
- * Responsibilities:
- *   1. Validate webhook authenticity (delegated to provider)
- *   2. Rate-limit per phone number (in-memory, before DB write)
- *   3. Normalize phone numbers
- *   4. Deduplicate on provider message ID
- *   5. Download MMS media to local storage
- *   6. Write message row to SQLite
- *   7. Purge old messages on startup and daily
- *   8. Log everything to logs/listener.log
+ * Security layers (in order):
+ *   1. Listen address binding (default 127.0.0.1 — behind tunnel)
+ *   2. Request body size limit (1MB)
+ *   3. Webhook path validation (constant-time)
+ *   4. Global rate limit (requests per second)
+ *   5. Provider-level authentication (signatures, tokens)
+ *   6. Phone number validation
+ *   7. Per-phone rate limit (sliding window)
+ *   8. Deduplication on provider message ID
+ *   9. SSRF protection on media downloads
+ *  10. Media size limits
  *
  * Usage: bun run listener.ts
  * Config: ~/.claude/channels/sms/.env
  */
 
 import { join } from "path";
-import { mkdirSync, appendFileSync } from "fs";
+import { mkdirSync, appendFileSync, chmodSync } from "fs";
 import { normalizePhone } from "./phone";
 import { getDb, insertInbound, closeDb, purgeOldMessages } from "./db";
 import { getProvider } from "./providers/index";
-import { checkRateLimit, cleanupStaleWindows } from "./ratelimit";
+import {
+  checkRateLimit,
+  checkGlobalRateLimit,
+  initGlobalRateLimit,
+  cleanupStaleWindows,
+} from "./ratelimit";
+import { constantTimeEquals } from "./crypto";
 import { loadEnv, STATE_DIR } from "./env";
 import type { InboundMessage } from "./providers/interface";
 
@@ -37,11 +45,16 @@ await loadEnv();
 
 const WEBHOOK_PATH = process.env.SMS_WEBHOOK_PATH || "/incoming";
 const LISTEN_PORT = parseInt(process.env.LISTEN_PORT || "5090", 10);
+const LISTEN_HOST = process.env.LISTEN_HOST || "127.0.0.1";
 const MEDIA_DIR = join(STATE_DIR, "media");
 const LOG_DIR = join(STATE_DIR, "logs");
 const LOG_PATH = join(LOG_DIR, "listener.log");
 
-// Rate limiting
+// Request limits
+const MAX_REQUEST_BODY_SIZE = 1 * 1024 * 1024; // 1MB
+const GLOBAL_RATE_LIMIT = parseInt(process.env.GLOBAL_RATE_LIMIT || "50", 10);
+
+// Per-phone rate limiting
 const RATE_LIMIT_PER_MINUTE = parseInt(process.env.RATE_LIMIT_PER_MINUTE || "10", 10);
 const RATE_LIMIT_PER_HOUR = parseInt(process.env.RATE_LIMIT_PER_HOUR || "100", 10);
 
@@ -50,13 +63,14 @@ const RETENTION_MAX_PER_PHONE = parseInt(process.env.RETENTION_MAX_PER_PHONE || 
 const RETENTION_MAX_DAYS = parseInt(process.env.RETENTION_MAX_DAYS || "180", 10);
 const RETENTION_BLOCKED_DAYS = parseInt(process.env.RETENTION_BLOCKED_DAYS || "3", 10);
 
-// Ensure directories exist
-mkdirSync(MEDIA_DIR, { recursive: true });
-mkdirSync(LOG_DIR, { recursive: true });
+// Ensure directories exist with restrictive permissions
+mkdirSync(MEDIA_DIR, { recursive: true, mode: 0o700 });
+mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
 
-// --- Initialize provider ---
+// --- Initialize provider and global rate limiter ---
 
 const provider = getProvider();
+initGlobalRateLimit(GLOBAL_RATE_LIMIT);
 
 // --- Logging ---
 
@@ -68,6 +82,8 @@ function log(level: string, msg: string, data?: Record<string, unknown>): void {
     ...data,
   });
   appendFileSync(LOG_PATH, entry + "\n");
+  // Restrict log file permissions (phone numbers are logged)
+  try { chmodSync(LOG_PATH, 0o600); } catch { /* may fail */ }
   if (level === "error") {
     console.error(`[${level}] ${msg}`);
   }
@@ -111,7 +127,6 @@ async function downloadMedia(
     const url = urls[i].trim();
     if (!url) continue;
 
-    // SSRF protection — block internal URLs
     if (!isAllowedMediaUrl(url)) {
       log("warn", "Blocked media URL (SSRF protection)", { url });
       continue;
@@ -124,7 +139,6 @@ async function downloadMedia(
         continue;
       }
 
-      // Check Content-Length before downloading
       const contentLength = parseInt(resp.headers.get("content-length") || "0", 10);
       if (contentLength > MAX_MEDIA_SIZE) {
         log("warn", "Media too large, skipped", { url, size: contentLength });
@@ -132,8 +146,6 @@ async function downloadMedia(
       }
 
       const buffer = await resp.arrayBuffer();
-
-      // Double-check actual size
       if (buffer.byteLength > MAX_MEDIA_SIZE) {
         log("warn", "Media too large after download, discarded", { url, size: buffer.byteLength });
         continue;
@@ -147,6 +159,8 @@ async function downloadMedia(
       const filePath = join(MEDIA_DIR, filename);
 
       await Bun.write(filePath, buffer);
+      // Restrict media file permissions
+      try { chmodSync(filePath, 0o600); } catch { /* may fail */ }
 
       localPaths.push(filePath);
       log("info", "Downloaded media", { url, filePath, size: buffer.byteLength });
@@ -173,19 +187,17 @@ if (purged > 0) {
 }
 
 log("info", "Webhook listener starting", {
+  host: LISTEN_HOST,
   port: LISTEN_PORT,
   path: WEBHOOK_PATH,
   provider: provider.name,
+  globalRateLimit: GLOBAL_RATE_LIMIT,
   rateLimitPerMinute: RATE_LIMIT_PER_MINUTE,
   rateLimitPerHour: RATE_LIMIT_PER_HOUR,
-  retentionMaxPerPhone: RETENTION_MAX_PER_PHONE,
-  retentionMaxDays: RETENTION_MAX_DAYS,
-  retentionBlockedDays: RETENTION_BLOCKED_DAYS,
 });
 
 // --- Periodic maintenance ---
 
-// Purge old messages daily
 setInterval(() => {
   try {
     const deleted = purgeOldMessages(RETENTION_MAX_PER_PHONE, RETENTION_MAX_DAYS, RETENTION_BLOCKED_DAYS);
@@ -197,18 +209,18 @@ setInterval(() => {
   }
 }, 24 * 60 * 60 * 1000);
 
-// Clean up stale rate limiter windows every 10 minutes
 setInterval(cleanupStaleWindows, 10 * 60 * 1000);
 
 // --- HTTP Server ---
 
 const server = Bun.serve({
   port: LISTEN_PORT,
+  hostname: LISTEN_HOST,
 
   async fetch(req) {
     const url = new URL(req.url);
 
-    // Health check — no internal details exposed
+    // Health check (exact path, no timing leak)
     if (url.pathname === "/health") {
       return new Response(JSON.stringify({ status: "ok" }), {
         status: 200,
@@ -216,15 +228,26 @@ const server = Bun.serve({
       });
     }
 
-    // Only accept the configured webhook path
-    if (url.pathname !== WEBHOOK_PATH) {
+    // Webhook path — constant-time comparison to prevent path brute-forcing
+    if (!constantTimeEquals(url.pathname, WEBHOOK_PATH)) {
       return new Response("not found", { status: 404 });
     }
 
-    // Check HTTP method against what the provider expects
+    // HTTP method check
     const allowedMethods = provider.webhookMethod.split("|");
     if (!allowedMethods.includes(req.method)) {
       return new Response("method not allowed", { status: 405 });
+    }
+
+    // Global rate limit — protect against volumetric attacks
+    if (!checkGlobalRateLimit()) {
+      return new Response("too many requests", { status: 429 });
+    }
+
+    // Request body size limit — reject before reading
+    const contentLength = parseInt(req.headers.get("content-length") || "0", 10);
+    if (contentLength > MAX_REQUEST_BODY_SIZE) {
+      return new Response("payload too large", { status: 413 });
     }
 
     // Delegate parsing and validation to the provider
@@ -252,10 +275,10 @@ const server = Bun.serve({
       return new Response("ok", { status: 200 });
     }
 
-    // Rate limit check — before any DB write
+    // Per-phone rate limit — before any DB write
     if (!checkRateLimit(phone, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR)) {
       log("warn", "Rate limited", { phone });
-      return new Response("ok", { status: 200 }); // 200 so provider doesn't retry
+      return new Response("ok", { status: 200 });
     }
 
     // Return 200 immediately — most providers don't retry
@@ -276,7 +299,6 @@ async function processInbound(msg: InboundMessage, phone: string): Promise<void>
     messageLength: msg.message.length,
   });
 
-  // If no media in webhook, try provider's fetchMedia fallback
   let mediaUrls = msg.mediaUrls;
   if (mediaUrls.length === 0 && msg.providerMessageId) {
     try {
@@ -289,16 +311,18 @@ async function processInbound(msg: InboundMessage, phone: string): Promise<void>
     }
   }
 
-  // Download media locally
   let localMediaPaths: string[] = [];
   if (mediaUrls.length > 0) {
     localMediaPaths = await downloadMedia(mediaUrls, msg.providerMessageId);
   }
 
-  // Normalize the local DID that received this message
-  const did = msg.to ? normalizePhone(msg.to) : "";
+  let did = "";
+  try {
+    did = msg.to ? normalizePhone(msg.to) : "";
+  } catch {
+    // DID normalization failure is non-fatal — just leave it empty
+  }
 
-  // Insert to database (deduplicates on provider message ID)
   const rowId = insertInbound(
     phone,
     msg.message,
@@ -335,8 +359,9 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
 log("info", "Webhook listener ready", {
+  host: LISTEN_HOST,
   port: LISTEN_PORT,
   path: WEBHOOK_PATH,
   provider: provider.name,
 });
-console.log(`SMS webhook listener running on port ${LISTEN_PORT} (provider: ${provider.name})`);
+console.log(`SMS webhook listener running on ${LISTEN_HOST}:${LISTEN_PORT} (provider: ${provider.name})`);
