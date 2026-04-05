@@ -181,14 +181,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "download_attachment",
-      description: "Get local file paths for MMS media on a message",
+      description: "Get local file paths for MMS media on a message. The chat_id must match the conversation the message belongs to.",
       inputSchema: {
         type: "object" as const,
         properties: {
-          chat_id: { type: "string", description: "Phone number (unused, for channel compat)" },
+          chat_id: { type: "string", description: "Phone number in E.164 format — must match the message's conversation" },
           message_id: { type: "string", description: "Message ID from the database" },
         },
-        required: ["message_id"],
+        required: ["chat_id", "message_id"],
       },
     },
   ],
@@ -298,7 +298,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "download_attachment": {
       const messageId = parseInt(args?.message_id as string, 10);
-      const chatId2 = args?.chat_id as string | undefined;
+      const chatId2 = args?.chat_id as string;
+
+      // Access scoping: chat_id is required and must match the message's conversation
+      let scopedPhone: string;
+      try {
+        scopedPhone = normalizePhone(chatId2);
+      } catch {
+        return {
+          content: [{ type: "text" as const, text: `Invalid phone number: ${chatId2}` }],
+          isError: true,
+        };
+      }
+
       const msg = getMessage(messageId);
 
       if (!msg) {
@@ -310,19 +322,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      // Access scoping: if chat_id provided, verify message belongs to that conversation
-      if (chatId2) {
-        try {
-          const scopedPhone = normalizePhone(chatId2);
-          if (msg.phone !== scopedPhone) {
-            return {
-              content: [
-                { type: "text" as const, text: `Message ${messageId} does not belong to ${scopedPhone}` },
-              ],
-              isError: true,
-            };
-          }
-        } catch { /* invalid phone — skip scoping */ }
+      if (msg.phone !== scopedPhone) {
+        return {
+          content: [
+            { type: "text" as const, text: `Message ${messageId} does not belong to ${scopedPhone}` },
+          ],
+          isError: true,
+        };
       }
 
       if (!msg.media) {
@@ -366,8 +372,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-// Track processed permission request IDs to prevent replay
-const processedPermissionIds = new Set<string>();
+// Track processed permission request IDs to prevent replay (with timestamps for pruning)
+const processedPermissionIds = new Map<string, number>();
+const PERMISSION_ID_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 function startPolling(): void {
   getDb();
@@ -378,6 +385,12 @@ function startPolling(): void {
 
   pollInterval = setInterval(() => {
     try {
+      // Prune expired permission IDs
+      const now = Date.now();
+      for (const [id, ts] of processedPermissionIds) {
+        if (now - ts > PERMISSION_ID_TTL_MS) processedPermissionIds.delete(id);
+      }
+
       const rows = fetchUndeliveredForSession(SESSION_ID, SUBSCRIBE_DIDS);
 
       for (const row of rows) {
@@ -397,7 +410,7 @@ function startPolling(): void {
 
             // Prevent replay of already-processed permission replies
             if (!processedPermissionIds.has(requestId)) {
-              processedPermissionIds.add(requestId);
+              processedPermissionIds.set(requestId, Date.now());
               server.notification({
                 method: "notifications/claude/channel/permission",
                 params: {

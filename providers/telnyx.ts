@@ -72,6 +72,11 @@ export const telnyxProvider: SmsProvider = {
     if (missing.length > 0) {
       throw new Error(`Telnyx: missing env vars: ${missing.join(", ")}`);
     }
+    if (!process.env.TELNYX_PUBLIC_KEY && !process.env.SMS_WEBHOOK_TOKEN) {
+      throw new Error(
+        "Telnyx: at least one of TELNYX_PUBLIC_KEY or SMS_WEBHOOK_TOKEN must be set for webhook authentication"
+      );
+    }
   },
 
   async sendSMS(to: string, message: string): Promise<SendResult> {

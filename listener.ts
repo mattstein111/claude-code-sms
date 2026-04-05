@@ -134,42 +134,49 @@ function isPrivateIp(ip: string): boolean {
 }
 
 /**
- * Validate a media URL is safe to fetch (SSRF protection).
- * Checks protocol, hostname blocklist, and DNS resolution.
- * Defends against DNS rebinding by resolving the hostname before allowing fetch.
+ * Validate a media URL and resolve DNS to pin the IP.
+ * Returns { pinnedUrl, originalHost } if safe, null if blocked.
+ *
+ * Replaces the hostname with a resolved IP to defeat DNS rebinding.
+ * Sets the Host header to the original hostname for TLS/vhost.
  */
-async function isAllowedMediaUrl(rawUrl: string): Promise<boolean> {
+async function resolveAndValidateMediaUrl(rawUrl: string): Promise<{ pinnedUrl: string; originalHost: string } | null> {
   try {
     const parsed = new URL(rawUrl);
-    if (!["http:", "https:"].includes(parsed.protocol)) return false;
+    if (!["http:", "https:"].includes(parsed.protocol)) return null;
 
     const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
 
     // Block obvious private hostnames
-    if (host === "localhost" || host === "0.0.0.0") return false;
-    if (host.endsWith(".local") || host.endsWith(".internal")) return false;
-    if (host === "metadata.google.internal") return false;
+    if (host === "localhost" || host === "0.0.0.0") return null;
+    if (host.endsWith(".local") || host.endsWith(".internal")) return null;
+    if (host === "metadata.google.internal") return null;
 
     // Check if host is a raw IP address
-    if (isPrivateIp(host)) return false;
+    if (isPrivateIp(host)) return null;
 
     // Block decimal (2130706433) and hex (0x7f000001) IP encodings
-    if (/^\d+$/.test(host) || /^0x[0-9a-f]+$/i.test(host)) return false;
+    if (/^\d+$/.test(host) || /^0x[0-9a-f]+$/i.test(host)) return null;
 
-    // Resolve hostname to IPs and check each one (defeats DNS rebinding)
+    // Resolve hostname and validate all addresses
+    let resolvedIp: string;
     try {
       const addresses = await dnsResolve(host);
       for (const addr of addresses) {
-        if (isPrivateIp(addr)) return false;
+        if (isPrivateIp(addr)) return null;
       }
+      resolvedIp = addresses[0];
     } catch {
-      // DNS resolution failed — block the request
-      return false;
+      return null;
     }
 
-    return true;
+    // Pin the URL to the resolved IP to defeat DNS rebinding
+    const pinnedUrl = new URL(rawUrl);
+    pinnedUrl.hostname = resolvedIp;
+
+    return { pinnedUrl: pinnedUrl.toString(), originalHost: host };
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -184,13 +191,18 @@ async function downloadMedia(
     const url = urls[i].trim();
     if (!url) continue;
 
-    if (!(await isAllowedMediaUrl(url))) {
+    // SSRF protection — resolve DNS, validate IPs, pin to resolved address
+    const resolved = await resolveAndValidateMediaUrl(url);
+    if (!resolved) {
       log("warn", "Blocked media URL (SSRF protection)", { url });
       continue;
     }
 
     try {
-      const resp = await fetch(url);
+      // Fetch using pinned IP to defeat DNS rebinding
+      const resp = await fetch(resolved.pinnedUrl, {
+        headers: { Host: resolved.originalHost },
+      });
       if (!resp.ok) {
         log("error", "Failed to download media", { url, status: resp.status });
         continue;

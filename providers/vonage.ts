@@ -169,7 +169,11 @@ export const vonageProvider: SmsProvider = {
 
     let body: Record<string, unknown>;
     if (contentType.includes("application/json")) {
-      body = JSON.parse(rawBody) as Record<string, unknown>;
+      try {
+        body = JSON.parse(rawBody) as Record<string, unknown>;
+      } catch {
+        return null; // malformed JSON
+      }
     } else {
       body = Object.fromEntries(new URLSearchParams(rawBody));
     }

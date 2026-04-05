@@ -23,7 +23,7 @@
 
 import type { SmsProvider, InboundMessage, SendResult } from "./interface";
 import { createHmac } from "crypto";
-import { constantTimeEquals } from "../crypto";
+import { constantTimeEquals, constantTimeEqualsBase64 } from "../crypto";
 
 const API_BASE = "https://api.plivo.com/v1/Account";
 
@@ -150,7 +150,7 @@ export const plivoProvider: SmsProvider = {
       const expected = createHmac("sha256", config.signatureToken)
         .update(dataToSign)
         .digest("base64");
-      if (!constantTimeEquals(signature, expected)) return null;
+      if (!constantTimeEqualsBase64(signature, expected)) return null;
     }
 
     const contentType = req.headers.get("content-type") || "";
