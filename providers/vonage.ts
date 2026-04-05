@@ -212,6 +212,10 @@ export const vonageProvider: SmsProvider = {
     };
   },
 
+  getFromNumber(): string {
+    return process.env.VONAGE_PHONE_NUMBER!;
+  },
+
   async fetchMedia(): Promise<string[]> {
     // Vonage includes media URLs in the webhook payload directly
     return [];

@@ -181,6 +181,10 @@ export const telnyxProvider: SmsProvider = {
     };
   },
 
+  getFromNumber(): string {
+    return process.env.TELNYX_PHONE_NUMBER!;
+  },
+
   async fetchMedia(): Promise<string[]> {
     // Telnyx includes media URLs in the webhook payload
     return [];

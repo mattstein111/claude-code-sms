@@ -5,6 +5,15 @@
  * the MCP server (reads inbound, writes outbound).
  *
  * Uses Bun's built-in SQLite driver (bun:sqlite).
+ *
+ * Retention policy (per counterparty phone number):
+ *   - Keep the last RETENTION_MAX_PER_PHONE messages (default 1000)
+ *   - Only if sent within RETENTION_MAX_DAYS (default 180)
+ *   - Blocked messages (delivered = -1) purge after RETENTION_BLOCKED_DAYS (default 3)
+ *   - Undelivered messages (delivered = 0) are never purged
+ *
+ * The `did` column records which local number sent/received the message,
+ * enabling multi-number / multi-provider support.
  */
 
 import { Database } from "bun:sqlite";
@@ -32,12 +41,20 @@ export function getDb(): Database {
       timestamp TEXT NOT NULL,
       direction TEXT NOT NULL,
       phone TEXT NOT NULL,
+      did TEXT NOT NULL DEFAULT '',
       message TEXT NOT NULL DEFAULT '',
       media TEXT DEFAULT '',
       voipms_id TEXT DEFAULT '',
       delivered INTEGER DEFAULT 0
     )
   `);
+
+  // Migration: add did column if missing (existing DBs from before this change)
+  try {
+    _db.run("ALTER TABLE messages ADD COLUMN did TEXT NOT NULL DEFAULT ''");
+  } catch {
+    // Column already exists — expected on subsequent runs
+  }
 
   _db.run(
     "CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone)"
@@ -57,6 +74,7 @@ export interface MessageRow {
   timestamp: string;
   direction: string;
   phone: string;
+  did: string;
   message: string;
   media: string;
   voipms_id: string;
@@ -67,9 +85,10 @@ export interface MessageRow {
 export function insertInbound(
   phone: string,
   message: string,
-  voipmsId: string,
+  providerMessageId: string,
   media: string = "",
-  timestamp?: string
+  timestamp?: string,
+  did: string = ""
 ): number | null {
   const db = getDb();
   const ts = timestamp || new Date().toISOString();
@@ -77,10 +96,10 @@ export function insertInbound(
   try {
     const result = db
       .prepare(
-        `INSERT INTO messages (timestamp, direction, phone, message, media, voipms_id)
-         VALUES (?, 'in', ?, ?, ?, ?)`
+        `INSERT INTO messages (timestamp, direction, phone, did, message, media, voipms_id)
+         VALUES (?, 'in', ?, ?, ?, ?, ?)`
       )
-      .run(ts, phone, message, media, voipmsId);
+      .run(ts, phone, did, message, media, providerMessageId);
     return Number(result.lastInsertRowid);
   } catch (err: any) {
     // Unique constraint on voipms_id — duplicate webhook delivery
@@ -93,17 +112,18 @@ export function insertInbound(
 export function insertOutbound(
   phone: string,
   message: string,
-  media: string = ""
+  media: string = "",
+  did: string = ""
 ): number {
   const db = getDb();
   const ts = new Date().toISOString();
 
   const result = db
     .prepare(
-      `INSERT INTO messages (timestamp, direction, phone, message, media, delivered)
-       VALUES (?, 'out', ?, ?, ?, 1)`
+      `INSERT INTO messages (timestamp, direction, phone, did, message, media, delivered)
+       VALUES (?, 'out', ?, ?, ?, ?, 1)`
     )
-    .run(ts, phone, message, media);
+    .run(ts, phone, did, message, media);
   return Number(result.lastInsertRowid);
 }
 
@@ -112,7 +132,7 @@ export function fetchUndelivered(): MessageRow[] {
   const db = getDb();
   return db
     .prepare(
-      `SELECT id, timestamp, direction, phone, message, media, voipms_id, delivered
+      `SELECT id, timestamp, direction, phone, did, message, media, voipms_id, delivered
        FROM messages
        WHERE delivered = 0 AND direction = 'in'
        ORDER BY id ASC`
@@ -131,9 +151,9 @@ export function fetchMessages(phone: string, limit: number = 30): MessageRow[] {
   const db = getDb();
   return db
     .prepare(
-      `SELECT id, timestamp, direction, phone, message, media, voipms_id, delivered
+      `SELECT id, timestamp, direction, phone, did, message, media, voipms_id, delivered
        FROM messages
-       WHERE phone = ?
+       WHERE phone = ? AND delivered != -1
        ORDER BY id DESC
        LIMIT ?`
     )
@@ -147,7 +167,7 @@ export function getMessage(id: number): MessageRow | null {
   return (
     (db
       .prepare(
-        `SELECT id, timestamp, direction, phone, message, media, voipms_id, delivered
+        `SELECT id, timestamp, direction, phone, did, message, media, voipms_id, delivered
          FROM messages WHERE id = ?`
       )
       .get(id) as MessageRow) || null
@@ -162,16 +182,25 @@ export function markBlocked(id: number): void {
 
 /**
  * Purge old messages based on retention policy.
- * - Blocked (delivered = -1): delete after blockedDays
- * - Delivered (delivered = 1): delete after deliveredDays
- * - Undelivered (delivered = 0): never purge
- * Returns the number of rows deleted.
+ *
+ * For each counterparty phone number:
+ *   - Keep the most recent `maxPerPhone` messages
+ *   - Delete anything older than `maxDays` days
+ *   - Never purge undelivered messages (delivered = 0)
+ *
+ * Blocked messages (delivered = -1) use a separate, shorter retention.
+ *
+ * Returns the total number of rows deleted.
  */
-export function purgeOldMessages(deliveredDays: number, blockedDays: number): number {
+export function purgeOldMessages(
+  maxPerPhone: number,
+  maxDays: number,
+  blockedDays: number
+): number {
   const db = getDb();
   let total = 0;
 
-  // Purge old blocked messages
+  // 1. Purge blocked messages older than blockedDays
   if (blockedDays > 0) {
     const result = db
       .prepare(
@@ -183,16 +212,46 @@ export function purgeOldMessages(deliveredDays: number, blockedDays: number): nu
     total += result.changes;
   }
 
-  // Purge old delivered messages
-  if (deliveredDays > 0) {
+  // 2. Purge delivered/outbound messages older than maxDays
+  if (maxDays > 0) {
     const result = db
       .prepare(
         `DELETE FROM messages
-         WHERE delivered = 1
+         WHERE delivered != 0
+         AND delivered != -1
          AND timestamp < datetime('now', '-' || ? || ' days')`
       )
-      .run(deliveredDays);
+      .run(maxDays);
     total += result.changes;
+  }
+
+  // 3. Per-phone: keep only the most recent maxPerPhone messages
+  //    (excluding undelivered which are never purged)
+  if (maxPerPhone > 0) {
+    // Get all distinct counterparty phone numbers
+    const phones = db
+      .prepare("SELECT DISTINCT phone FROM messages WHERE delivered != 0 AND delivered != -1")
+      .all() as Array<{ phone: string }>;
+
+    for (const { phone } of phones) {
+      const result = db
+        .prepare(
+          `DELETE FROM messages
+           WHERE phone = ?
+           AND delivered != 0
+           AND delivered != -1
+           AND id NOT IN (
+             SELECT id FROM messages
+             WHERE phone = ?
+             AND delivered != 0
+             AND delivered != -1
+             ORDER BY id DESC
+             LIMIT ?
+           )`
+        )
+        .run(phone, phone, maxPerPhone);
+      total += result.changes;
+    }
   }
 
   return total;

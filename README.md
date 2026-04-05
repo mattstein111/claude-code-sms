@@ -110,15 +110,18 @@ Rate-limited messages are silently dropped (200 response so the provider doesn't
 
 ### Message Retention
 
-The database is automatically pruned to prevent unbounded growth:
+The database keeps a conversation window per counterparty so Claude Code can always reconstitute a thread:
 
-| Message state | Retention | Env var |
-|---------------|-----------|---------|
-| **Delivered** (seen by Claude Code) | 7 days | `RETENTION_DELIVERED_DAYS` |
-| **Blocked** (from blocklisted numbers) | 3 days | `RETENTION_BLOCKED_DAYS` |
-| **Undelivered** (not yet seen) | Never purged | — |
+| Setting | Env var | Default |
+|---------|---------|---------|
+| Max messages per counterparty | `RETENTION_MAX_PER_PHONE` | 1000 |
+| Max age for all messages | `RETENTION_MAX_DAYS` | 180 days |
+| Max age for blocked messages | `RETENTION_BLOCKED_DAYS` | 3 days |
 
-Purge runs on listener startup and every 24 hours. Set to `0` to keep forever.
+- Both inbound and outbound messages are stored so full conversation context is available
+- Undelivered messages (not yet seen by Claude Code) are **never purged**
+- Purge runs on listener startup and every 24 hours
+- Set any value to `0` to disable that purge rule
 
 ---
 

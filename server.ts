@@ -235,7 +235,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           } else {
             await provider.sendSMS(chatId, chunkText);
           }
-          lastId = insertOutbound(chatId, chunkText, mediaUrls.join(","));
+          lastId = insertOutbound(chatId, chunkText, mediaUrls.join(","), provider.getFromNumber());
         }
 
         return {
@@ -381,6 +381,11 @@ function startPolling(): void {
           ts: row.timestamp,
         };
 
+        // Which local number received this message
+        if (row.did) {
+          meta.did = row.did;
+        }
+
         // Owner flag
         if (gateResult.trust === "owner") {
           meta.owner = "true";
@@ -432,7 +437,7 @@ server.setNotificationHandler(
 
     try {
       await provider.sendSMS(ownerPhone, msg);
-      insertOutbound(ownerPhone, msg);
+      insertOutbound(ownerPhone, msg, "", provider.getFromNumber());
       log(`Permission request ${params.request_id} sent to owner`);
     } catch (err) {
       log(`Failed to send permission request: ${err}`);

@@ -60,8 +60,9 @@ const LOG_PATH = join(LOG_DIR, "listener.log");
 const RATE_LIMIT_PER_MINUTE = parseInt(process.env.RATE_LIMIT_PER_MINUTE || "10", 10);
 const RATE_LIMIT_PER_HOUR = parseInt(process.env.RATE_LIMIT_PER_HOUR || "100", 10);
 
-// Retention (days). 0 = keep forever.
-const RETENTION_DELIVERED_DAYS = parseInt(process.env.RETENTION_DELIVERED_DAYS || "7", 10);
+// Retention
+const RETENTION_MAX_PER_PHONE = parseInt(process.env.RETENTION_MAX_PER_PHONE || "1000", 10);
+const RETENTION_MAX_DAYS = parseInt(process.env.RETENTION_MAX_DAYS || "180", 10);
 const RETENTION_BLOCKED_DAYS = parseInt(process.env.RETENTION_BLOCKED_DAYS || "3", 10);
 
 // Ensure directories exist
@@ -129,11 +130,12 @@ async function downloadMedia(
 
 getDb();
 
-const purged = purgeOldMessages(RETENTION_DELIVERED_DAYS, RETENTION_BLOCKED_DAYS);
+const purged = purgeOldMessages(RETENTION_MAX_PER_PHONE, RETENTION_MAX_DAYS, RETENTION_BLOCKED_DAYS);
 if (purged > 0) {
   log("info", "Startup purge", {
     deleted: purged,
-    deliveredDays: RETENTION_DELIVERED_DAYS,
+    maxPerPhone: RETENTION_MAX_PER_PHONE,
+    maxDays: RETENTION_MAX_DAYS,
     blockedDays: RETENTION_BLOCKED_DAYS,
   });
 }
@@ -144,7 +146,8 @@ log("info", "Webhook listener starting", {
   provider: provider.name,
   rateLimitPerMinute: RATE_LIMIT_PER_MINUTE,
   rateLimitPerHour: RATE_LIMIT_PER_HOUR,
-  retentionDeliveredDays: RETENTION_DELIVERED_DAYS,
+  retentionMaxPerPhone: RETENTION_MAX_PER_PHONE,
+  retentionMaxDays: RETENTION_MAX_DAYS,
   retentionBlockedDays: RETENTION_BLOCKED_DAYS,
 });
 
@@ -153,7 +156,7 @@ log("info", "Webhook listener starting", {
 // Purge old messages daily
 setInterval(() => {
   try {
-    const deleted = purgeOldMessages(RETENTION_DELIVERED_DAYS, RETENTION_BLOCKED_DAYS);
+    const deleted = purgeOldMessages(RETENTION_MAX_PER_PHONE, RETENTION_MAX_DAYS, RETENTION_BLOCKED_DAYS);
     if (deleted > 0) {
       log("info", "Periodic purge", { deleted });
     }
@@ -252,13 +255,17 @@ async function processInbound(msg: InboundMessage, phone: string): Promise<void>
     localMediaPaths = await downloadMedia(mediaUrls, msg.providerMessageId);
   }
 
+  // Normalize the local DID that received this message
+  const did = msg.to ? normalizePhone(msg.to) : "";
+
   // Insert to database (deduplicates on provider message ID)
   const rowId = insertInbound(
     phone,
     msg.message,
     msg.providerMessageId,
     localMediaPaths.join(","),
-    new Date().toISOString()
+    new Date().toISOString(),
+    did
   );
 
   if (rowId === null) {

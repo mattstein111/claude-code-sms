@@ -176,6 +176,10 @@ export const plivoProvider: SmsProvider = {
     };
   },
 
+  getFromNumber(): string {
+    return process.env.PLIVO_PHONE_NUMBER!;
+  },
+
   async fetchMedia(): Promise<string[]> {
     // Plivo includes media URLs in the webhook payload
     return [];

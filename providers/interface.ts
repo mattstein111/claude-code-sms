@@ -75,4 +75,10 @@ export interface SmsProvider {
    * voip.ms uses GET, most others use POST.
    */
   readonly webhookMethod: "GET" | "POST" | "GET|POST";
+
+  /**
+   * Get the local phone number (DID) this provider sends from.
+   * Returns E.164 format. Used to record which number sent outbound messages.
+   */
+  getFromNumber(): string;
 }

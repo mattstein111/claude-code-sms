@@ -186,6 +186,10 @@ export const twilioProvider: SmsProvider = {
     };
   },
 
+  getFromNumber(): string {
+    return process.env.TWILIO_PHONE_NUMBER!;
+  },
+
   async fetchMedia(providerMessageId: string): Promise<string[]> {
     const config = getConfig();
     const url = `${API_BASE}/Accounts/${config.accountSid}/Messages/${providerMessageId}/Media.json`;

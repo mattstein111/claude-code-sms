@@ -46,10 +46,12 @@ All state lives under `~/.claude/channels/sms/`:
 
 - In-memory rate limiter in the listener (per phone, sliding window, before DB write)
 - Defaults: 10/min, 100/hour per number. Configurable via `RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_PER_HOUR`
-- Delivered messages purged after 7 days, blocked after 3 days, undelivered never purged
-- Configurable via `RETENTION_DELIVERED_DAYS`, `RETENTION_BLOCKED_DAYS`
+- Retention per counterparty: keep last 1000 messages, max 180 days. Blocked purge after 3 days.
+- Configurable via `RETENTION_MAX_PER_PHONE`, `RETENTION_MAX_DAYS`, `RETENTION_BLOCKED_DAYS`
+- Undelivered messages (delivered = 0) are never purged
 - Purge runs on listener startup + daily
 - `delivered` column: `0` = undelivered, `1` = delivered, `-1` = blocked
+- `did` column tracks which local number sent/received (enables multi-number support)
 
 ## Tools exposed
 
