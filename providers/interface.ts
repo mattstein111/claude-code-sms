@@ -72,7 +72,7 @@ export interface SmsProvider {
 
   /**
    * HTTP method(s) the provider uses for webhooks.
-   * voip.ms uses GET, most others use POST.
+   * Most providers use POST; some legacy APIs use GET.
    */
   readonly webhookMethod: "GET" | "POST" | "GET|POST";
 
