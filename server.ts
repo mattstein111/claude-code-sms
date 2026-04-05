@@ -24,8 +24,6 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { join } from "path";
-import { existsSync } from "fs";
 import { normalizePhone } from "./phone";
 import {
   getDb,
@@ -41,25 +39,11 @@ import {
 } from "./db";
 import { getProvider } from "./providers/index";
 import { gate, getOwnerPhone, readAccess } from "./access";
+import { loadEnv } from "./env";
 
 // --- Load .env from state directory ---
 
-const STATE_DIR =
-  process.env.SMS_STATE_DIR || join(process.env.HOME!, ".claude/channels/sms");
-const ENV_PATH = join(STATE_DIR, ".env");
-
-if (existsSync(ENV_PATH)) {
-  const envContent = await Bun.file(ENV_PATH).text();
-  for (const line of envContent.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eqIdx = trimmed.indexOf("=");
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    const value = trimmed.slice(eqIdx + 1).trim();
-    process.env[key] = value;
-  }
-}
+await loadEnv();
 
 // --- Initialize provider ---
 
@@ -263,7 +247,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text" as const,
-              text: `Failed to send to ${chatId}: ${err}`,
+              text: `Failed to send to ${chatId}: ${err instanceof Error ? err.message : "unknown error"}`,
             },
           ],
           isError: true,

@@ -28,6 +28,7 @@
 
 import { Database } from "bun:sqlite";
 import { join } from "path";
+import { chmodSync } from "fs";
 
 const STATE_DIR =
   process.env.SMS_STATE_DIR || join(process.env.HOME!, ".claude/channels/sms");
@@ -40,6 +41,9 @@ export function getDb(): Database {
   if (_db) return _db;
 
   _db = new Database(DB_PATH, { create: true });
+
+  // Restrict DB file permissions — contains message content
+  try { chmodSync(DB_PATH, 0o600); } catch { /* may fail on some systems */ }
 
   // WAL mode for concurrent reader/writer (listener + multiple MCP servers)
   _db.run("PRAGMA journal_mode = WAL");

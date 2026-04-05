@@ -9,6 +9,7 @@
 
 import { readFileSync, writeFileSync, renameSync } from "fs";
 import { join } from "path";
+import { normalizePhone } from "./phone";
 
 const STATE_DIR =
   process.env.SMS_STATE_DIR || join(process.env.HOME!, ".claude/channels/sms");
@@ -68,9 +69,15 @@ function matchesAny(phone: string, patterns: string[]): boolean {
   return patterns.some((p) => matchPattern(phone, p));
 }
 
-/** Get the owner phone number from env. */
+/** Get the owner phone number from env, normalized to E.164. */
 export function getOwnerPhone(): string | null {
-  return process.env.OWNER_PHONE || null;
+  const raw = process.env.OWNER_PHONE;
+  if (!raw) return null;
+  try {
+    return normalizePhone(raw);
+  } catch {
+    return null;
+  }
 }
 
 /**

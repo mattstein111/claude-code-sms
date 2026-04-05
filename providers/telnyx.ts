@@ -9,7 +9,7 @@
  * Required env vars:
  *   TELNYX_API_KEY          — Telnyx API v2 key (starts with KEY...)
  *   TELNYX_PHONE_NUMBER     — Telnyx phone number in E.164
- *   TELNYX_PUBLIC_KEY       — Telnyx webhook public key (for signature validation)
+ *   TELNYX_PUBLIC_KEY       — Telnyx webhook public key (MANDATORY for signature validation)
  *   SMS_WEBHOOK_TOKEN       — optional extra token for webhook URL validation
  *
  * Optional:
@@ -22,6 +22,8 @@
  */
 
 import type { SmsProvider, InboundMessage, SendResult } from "./interface";
+import { verify } from "crypto";
+import { constantTimeEquals } from "../crypto";
 
 const API_BASE = "https://api.telnyx.com/v2/messages";
 
@@ -32,6 +34,32 @@ function getConfig() {
     publicKey: process.env.TELNYX_PUBLIC_KEY,
     messagingProfileId: process.env.TELNYX_MESSAGING_PROFILE_ID,
   };
+}
+
+/**
+ * Verify Telnyx webhook ed25519 signature.
+ * https://developers.telnyx.com/docs/api/v2/overview#webhook-signing
+ *
+ * Telnyx signs `timestamp|body` with an ed25519 private key.
+ * The public key is available in the Telnyx portal.
+ */
+function verifyTelnyxSignature(
+  publicKey: string,
+  signature: string,
+  timestamp: string,
+  body: string
+): boolean {
+  try {
+    const signedPayload = `${timestamp}|${body}`;
+    return verify(
+      null,
+      Buffer.from(signedPayload),
+      { key: publicKey, format: "pem" },
+      Buffer.from(signature, "base64")
+    );
+  } catch {
+    return false;
+  }
 }
 
 export const telnyxProvider: SmsProvider = {
@@ -112,33 +140,30 @@ export const telnyxProvider: SmsProvider = {
   async parseWebhook(req: Request): Promise<InboundMessage | null> {
     if (req.method !== "POST") return null;
 
-    // Check optional token in query string
+    // Check optional token in query string (constant-time)
     const webhookToken = process.env.SMS_WEBHOOK_TOKEN;
     if (webhookToken) {
       const url = new URL(req.url);
       const token = url.searchParams.get("token");
-      if (token !== webhookToken) return null;
+      if (!constantTimeEquals(token, webhookToken)) return null;
     }
 
-    // Telnyx webhook signature validation uses ed25519
-    // The public key is available in the Telnyx portal
-    // Full validation requires the telnyx package — for now, rely on
-    // the webhook token and/or Cloudflare tunnel for security
+    // Read body once
+    const rawBody = await req.text();
+
+    // ed25519 signature validation — MANDATORY when public key is configured
     const config = getConfig();
     if (config.publicKey) {
       const signature = req.headers.get("telnyx-signature-ed25519");
       const timestamp = req.headers.get("telnyx-timestamp");
-      if (!signature || !timestamp) {
-        // Signature headers missing — if public key is configured, reject
+      if (!signature || !timestamp) return null; // reject unsigned
+
+      if (!verifyTelnyxSignature(config.publicKey, signature, timestamp, rawBody)) {
         return null;
       }
-      // Note: Full ed25519 verification would require importing the public key
-      // and verifying the signature over `timestamp|body`. For now, we check
-      // that the headers are present when a public key is configured.
-      // TODO: Implement full ed25519 verification
     }
 
-    const body = (await req.json()) as {
+    const body = JSON.parse(rawBody) as {
       data?: {
         event_type?: string;
         payload?: {
@@ -154,7 +179,6 @@ export const telnyxProvider: SmsProvider = {
     const payload = body.data?.payload;
     if (!payload) return null;
 
-    // Only process inbound messages
     const eventType = body.data?.event_type;
     if (eventType && !eventType.includes("message.received")) return null;
 
@@ -186,7 +210,6 @@ export const telnyxProvider: SmsProvider = {
   },
 
   async fetchMedia(): Promise<string[]> {
-    // Telnyx includes media URLs in the webhook payload
     return [];
   },
 };

@@ -23,32 +23,17 @@
  */
 
 import { join } from "path";
-import { mkdirSync, appendFileSync, existsSync } from "fs";
+import { mkdirSync, appendFileSync } from "fs";
 import { normalizePhone } from "./phone";
 import { getDb, insertInbound, closeDb, purgeOldMessages } from "./db";
 import { getProvider } from "./providers/index";
 import { checkRateLimit, cleanupStaleWindows } from "./ratelimit";
+import { loadEnv, STATE_DIR } from "./env";
 import type { InboundMessage } from "./providers/interface";
 
 // --- Configuration ---
 
-const STATE_DIR =
-  process.env.SMS_STATE_DIR || join(process.env.HOME!, ".claude/channels/sms");
-const ENV_PATH = join(STATE_DIR, ".env");
-
-// Load .env from state directory
-if (existsSync(ENV_PATH)) {
-  const envContent = await Bun.file(ENV_PATH).text();
-  for (const line of envContent.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eqIdx = trimmed.indexOf("=");
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    const value = trimmed.slice(eqIdx + 1).trim();
-    process.env[key] = value;
-  }
-}
+await loadEnv();
 
 const WEBHOOK_PATH = process.env.SMS_WEBHOOK_PATH || "/incoming";
 const LISTEN_PORT = parseInt(process.env.LISTEN_PORT || "5090", 10);
@@ -90,15 +75,47 @@ function log(level: string, msg: string, data?: Record<string, unknown>): void {
 
 // --- Media download ---
 
+const MAX_MEDIA_SIZE = 10 * 1024 * 1024; // 10MB per file
+const MAX_MEDIA_PER_MESSAGE = 10;
+
+/**
+ * Validate a media URL is safe to fetch (SSRF protection).
+ * Blocks private/reserved IP ranges and non-HTTP protocols.
+ */
+function isAllowedMediaUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (!["http:", "https:"].includes(parsed.protocol)) return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]") return false;
+    if (host.startsWith("10.")) return false;
+    if (host.startsWith("192.168.")) return false;
+    if (host.startsWith("169.254.")) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false;
+    if (host.endsWith(".local") || host.endsWith(".internal")) return false;
+    if (host === "metadata.google.internal") return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function downloadMedia(
   urls: string[],
   messageId: string
 ): Promise<string[]> {
   const localPaths: string[] = [];
+  const limit = Math.min(urls.length, MAX_MEDIA_PER_MESSAGE);
 
-  for (let i = 0; i < urls.length; i++) {
+  for (let i = 0; i < limit; i++) {
     const url = urls[i].trim();
     if (!url) continue;
+
+    // SSRF protection — block internal URLs
+    if (!isAllowedMediaUrl(url)) {
+      log("warn", "Blocked media URL (SSRF protection)", { url });
+      continue;
+    }
 
     try {
       const resp = await fetch(url);
@@ -107,13 +124,28 @@ async function downloadMedia(
         continue;
       }
 
+      // Check Content-Length before downloading
+      const contentLength = parseInt(resp.headers.get("content-length") || "0", 10);
+      if (contentLength > MAX_MEDIA_SIZE) {
+        log("warn", "Media too large, skipped", { url, size: contentLength });
+        continue;
+      }
+
+      const buffer = await resp.arrayBuffer();
+
+      // Double-check actual size
+      if (buffer.byteLength > MAX_MEDIA_SIZE) {
+        log("warn", "Media too large after download, discarded", { url, size: buffer.byteLength });
+        continue;
+      }
+
       const contentType = resp.headers.get("content-type") || "application/octet-stream";
-      const ext = contentType.split("/").pop()?.split(";")[0] || "bin";
+      const rawExt = contentType.split("/").pop()?.split(";")[0] || "bin";
+      const ext = rawExt.replace(/[^a-zA-Z0-9]/g, "").slice(0, 10) || "bin";
       const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
       const filename = `${safeId}_${i}.${ext}`;
       const filePath = join(MEDIA_DIR, filename);
 
-      const buffer = await resp.arrayBuffer();
       await Bun.write(filePath, buffer);
 
       localPaths.push(filePath);
@@ -176,9 +208,9 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
 
-    // Health check
+    // Health check — no internal details exposed
     if (url.pathname === "/health") {
-      return new Response(JSON.stringify({ status: "ok", provider: provider.name }), {
+      return new Response(JSON.stringify({ status: "ok" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -211,8 +243,16 @@ const server = Bun.serve({
       return new Response("unauthorized", { status: 401 });
     }
 
+    // Normalize phone number — reject garbage
+    let phone: string;
+    try {
+      phone = normalizePhone(inbound.from);
+    } catch {
+      log("warn", "Invalid phone number in webhook", { from: inbound.from });
+      return new Response("ok", { status: 200 });
+    }
+
     // Rate limit check — before any DB write
-    const phone = normalizePhone(inbound.from);
     if (!checkRateLimit(phone, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR)) {
       log("warn", "Rate limited", { phone });
       return new Response("ok", { status: 200 }); // 200 so provider doesn't retry

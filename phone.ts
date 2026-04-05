@@ -5,9 +5,17 @@
  * voip.ms API expects 11 digits without the + prefix.
  */
 
-/** Normalize any phone string to E.164 format. */
+/**
+ * Normalize any phone string to E.164 format.
+ * Rejects inputs that don't look like valid phone numbers.
+ */
 export function normalizePhone(raw: string): string {
   const digits = raw.replace(/\D/g, "");
+
+  if (digits.length < 7 || digits.length > 15) {
+    throw new Error(`Invalid phone number: "${raw}" (${digits.length} digits)`);
+  }
+
   if (digits.length === 10) return `+1${digits}`;
   if (digits.length === 11 && digits[0] === "1") return `+${digits}`;
   return `+${digits}`;

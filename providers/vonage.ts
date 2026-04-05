@@ -15,7 +15,7 @@
  *   SMS_WEBHOOK_TOKEN    — secret token for webhook URL validation
  *
  * Optional:
- *   VONAGE_SIGNATURE_SECRET — for webhook signature validation
+ *   VONAGE_SIGNATURE_SECRET — for webhook signature validation (mandatory if set)
  *
  * Docs: https://developer.vonage.com/en/messaging/sms/overview
  *       https://developer.vonage.com/en/messages/overview
@@ -26,6 +26,7 @@
 
 import type { SmsProvider, InboundMessage, SendResult } from "./interface";
 import { createHmac } from "crypto";
+import { constantTimeEquals } from "../crypto";
 
 const SMS_API_BASE = "https://rest.nexmo.com";
 const MESSAGES_API_BASE = "https://api.nexmo.com/v1/messages";
@@ -54,7 +55,6 @@ export const vonageProvider: SmsProvider = {
   async sendSMS(to: string, message: string): Promise<SendResult> {
     const config = getConfig();
 
-    // Use the SMS API for plain text messages
     const resp = await fetch(`${SMS_API_BASE}/sms/json`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -87,11 +87,8 @@ export const vonageProvider: SmsProvider = {
   async sendMMS(to: string, message: string, mediaUrls: string[]): Promise<SendResult> {
     const config = getConfig();
 
-    // MMS requires the Messages API with basic auth
     const auth = "Basic " + btoa(`${config.apiKey}:${config.apiSecret}`);
 
-    // Vonage Messages API sends one image per request — send text + first image,
-    // then additional images as separate messages
     const resp = await fetch(MESSAGES_API_BASE, {
       method: "POST",
       headers: {
@@ -117,7 +114,6 @@ export const vonageProvider: SmsProvider = {
 
     const data = (await resp.json()) as { message_uuid: string };
 
-    // Send remaining images as separate messages
     for (let i = 1; i < mediaUrls.length; i++) {
       await fetch(MESSAGES_API_BASE, {
         method: "POST",
@@ -141,36 +137,35 @@ export const vonageProvider: SmsProvider = {
   async parseWebhook(req: Request): Promise<InboundMessage | null> {
     if (req.method !== "POST") return null;
 
-    // Check optional token in query string
+    // Check optional token in query string (constant-time)
     const webhookToken = process.env.SMS_WEBHOOK_TOKEN;
     if (webhookToken) {
       const url = new URL(req.url);
       const token = url.searchParams.get("token");
-      if (token !== webhookToken) return null;
+      if (!constantTimeEquals(token, webhookToken)) return null;
     }
 
+    // Read body once for both signature validation and parsing
+    const rawBody = await req.text();
     const contentType = req.headers.get("content-type") || "";
-    let body: Record<string, unknown>;
 
-    if (contentType.includes("application/json")) {
-      body = (await req.json()) as Record<string, unknown>;
-    } else {
-      // SMS API can send form-encoded
-      const text = await req.text();
-      body = Object.fromEntries(new URLSearchParams(text));
-    }
-
-    // Validate signature if configured
+    // Validate signature if configured — MANDATORY when secret is set
     const config = getConfig();
     if (config.signatureSecret) {
       const sig = req.headers.get("x-vonage-signature");
-      if (sig) {
-        // Vonage uses HMAC-SHA256 of the JSON body
-        const expected = createHmac("sha256", config.signatureSecret)
-          .update(JSON.stringify(body))
-          .digest("hex");
-        if (sig !== expected) return null;
-      }
+      if (!sig) return null; // reject unsigned when secret is configured
+
+      const expected = createHmac("sha256", config.signatureSecret)
+        .update(rawBody)
+        .digest("hex");
+      if (!constantTimeEquals(sig, expected)) return null;
+    }
+
+    let body: Record<string, unknown>;
+    if (contentType.includes("application/json")) {
+      body = JSON.parse(rawBody) as Record<string, unknown>;
+    } else {
+      body = Object.fromEntries(new URLSearchParams(rawBody));
     }
 
     // Messages API format (JSON with nested objects)
@@ -217,7 +212,6 @@ export const vonageProvider: SmsProvider = {
   },
 
   async fetchMedia(): Promise<string[]> {
-    // Vonage includes media URLs in the webhook payload directly
     return [];
   },
 };

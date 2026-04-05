@@ -18,6 +18,7 @@
  */
 
 import type { SmsProvider, InboundMessage, SendResult } from "./interface";
+import { constantTimeEquals } from "../crypto";
 
 const API_BASE = "https://voip.ms/api/v1/rest.php";
 
@@ -103,9 +104,9 @@ export const voipmsProvider: SmsProvider = {
     const url = new URL(req.url);
     const config = getConfig();
 
-    // Validate token
+    // Validate token (constant-time comparison)
     const token = url.searchParams.get("token");
-    if (token !== config.webhookToken) {
+    if (!constantTimeEquals(token, config.webhookToken)) {
       return null;
     }
 

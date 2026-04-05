@@ -14,6 +14,7 @@
  *
  * Webhook validation: Twilio signs webhooks with X-Twilio-Signature header
  * using HMAC-SHA1 of the request URL + sorted POST params, keyed with auth token.
+ * Signature validation is MANDATORY — unsigned requests are rejected.
  *
  * Docs: https://www.twilio.com/docs/messaging/api
  *
@@ -23,6 +24,7 @@
 
 import type { SmsProvider, InboundMessage, SendResult } from "./interface";
 import { createHmac } from "crypto";
+import { constantTimeEquals, constantTimeEqualsBase64 } from "../crypto";
 
 const API_BASE = "https://api.twilio.com/2010-04-01";
 
@@ -39,7 +41,7 @@ function basicAuth(sid: string, token: string): string {
 }
 
 /**
- * Validate Twilio webhook signature.
+ * Validate Twilio webhook signature (constant-time).
  * https://www.twilio.com/docs/usage/security#validating-requests
  */
 function validateSignature(
@@ -48,7 +50,6 @@ function validateSignature(
   url: string,
   params: Record<string, string>
 ): boolean {
-  // Build the data string: URL + sorted param key/value pairs concatenated
   const sortedKeys = Object.keys(params).sort();
   let data = url;
   for (const key of sortedKeys) {
@@ -56,7 +57,7 @@ function validateSignature(
   }
 
   const expected = createHmac("sha1", authToken).update(data).digest("base64");
-  return signature === expected;
+  return constantTimeEqualsBase64(signature, expected);
 }
 
 export const twilioProvider: SmsProvider = {
@@ -103,7 +104,6 @@ export const twilioProvider: SmsProvider = {
     const config = getConfig();
     const url = `${API_BASE}/Accounts/${config.accountSid}/Messages.json`;
 
-    // Twilio supports up to 10 media URLs per MMS
     if (mediaUrls.length > 10) {
       throw new Error("Twilio supports max 10 media URLs per MMS");
     }
@@ -145,21 +145,21 @@ export const twilioProvider: SmsProvider = {
     const body = await req.text();
     const params = Object.fromEntries(new URLSearchParams(body));
 
-    // Validate Twilio signature if present
+    // Twilio signature is MANDATORY — reject unsigned requests
     const signature = req.headers.get("x-twilio-signature");
-    if (signature) {
-      const requestUrl = new URL(req.url).toString();
-      if (!validateSignature(config.authToken, signature, requestUrl, params)) {
-        return null;
-      }
+    if (!signature) return null;
+
+    const requestUrl = new URL(req.url).toString();
+    if (!validateSignature(config.authToken, signature, requestUrl, params)) {
+      return null;
     }
 
-    // Also check optional extra token in query string
+    // Optional extra token in query string (defense in depth)
     const webhookToken = process.env.SMS_WEBHOOK_TOKEN;
     if (webhookToken) {
       const url = new URL(req.url);
       const token = url.searchParams.get("token");
-      if (token !== webhookToken) return null;
+      if (!constantTimeEquals(token, webhookToken)) return null;
     }
 
     const from = params.From || "";
@@ -170,7 +170,6 @@ export const twilioProvider: SmsProvider = {
 
     if (!from || !messageSid) return null;
 
-    // Collect media URLs (Twilio sends MediaUrl0, MediaUrl1, etc.)
     const mediaUrls: string[] = [];
     for (let i = 0; i < numMedia; i++) {
       const url = params[`MediaUrl${i}`];
