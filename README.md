@@ -41,14 +41,16 @@ flowchart LR
     style MCP fill:#3B82F6,color:#fff,stroke:none
 ```
 
-Two processes, one database:
+Two processes, one shared database:
 
 | Component | Role | Lifecycle |
 |-----------|------|-----------|
 | **Webhook Listener** | Catches inbound SMS/MMS, stores in SQLite | Always on (systemd / launchd) |
-| **MCP Server** | Polls DB, notifies Claude Code, sends replies | Runs with Claude Code |
+| **MCP Server** | Polls DB, notifies Claude Code, sends replies | One per Claude Code session |
 
-**Why two processes?** Most SMS providers fire webhooks once with no retry. The listener runs 24/7 so nothing is lost — the MCP server catches up when Claude Code starts.
+**Why two processes?** Most SMS providers fire webhooks once with no retry. The listener runs 24/7 so nothing is lost — MCP servers catch up when Claude Code starts.
+
+**Multi-instance safe.** Multiple Claude Code sessions on the same machine each get their own MCP server instance. Each independently tracks which messages it has delivered — so two sessions both see the same inbound SMS. Sessions can subscribe to specific DIDs via `SMS_SUBSCRIBE_DIDS` to partition by phone number.
 
 ---
 

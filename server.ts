@@ -6,6 +6,10 @@
  * and emits them as MCP channel notifications. Exposes tools for
  * sending SMS/MMS and fetching message history.
  *
+ * Multi-instance safe: each server registers a session and independently
+ * tracks which messages it has delivered. Multiple Claude Code sessions
+ * on the same machine all see the same inbound messages.
+ *
  * Owner phone (from .env) gets full trust including permission relay.
  * All other numbers are untrusted — messages delivered but flagged.
  * Blocklisted numbers are never delivered.
@@ -26,9 +30,11 @@ import { normalizePhone } from "./phone";
 import {
   getDb,
   closeDb,
-  fetchUndelivered,
-  markDelivered,
+  fetchUndeliveredForSession,
+  recordDeliveryBatch,
   markBlocked,
+  registerSession,
+  deactivateSession,
   insertOutbound,
   fetchMessages,
   getMessage,
@@ -59,10 +65,20 @@ if (existsSync(ENV_PATH)) {
 
 const provider = getProvider();
 
+// --- Session identity ---
+
+const SESSION_ID = `pid-${process.pid}-${Date.now()}`;
+
+// DID subscription: if SMS_SUBSCRIBE_DIDS is set, only deliver messages to those DIDs.
+// Comma-separated E.164 numbers. Null = deliver all.
+const SUBSCRIBE_DIDS: string[] | null = process.env.SMS_SUBSCRIBE_DIDS
+  ? process.env.SMS_SUBSCRIBE_DIDS.split(",").map((d) => d.trim())
+  : null;
+
 // --- Logging (stderr only — stdout is MCP protocol) ---
 
 function log(msg: string): void {
-  process.stderr.write(`[sms] ${msg}\n`);
+  process.stderr.write(`[sms:${SESSION_ID}] ${msg}\n`);
 }
 
 // --- Permission reply pattern ---
@@ -79,7 +95,6 @@ function chunk(
   if (text.length <= limit) return [text];
 
   if (mode === "newline") {
-    // Split at paragraph breaks, then fall back to length if segments too long
     const paragraphs = text.split(/\n\n+/);
     const chunks: string[] = [];
     let current = "";
@@ -94,7 +109,6 @@ function chunk(
     }
     if (current) chunks.push(current);
 
-    // If any chunk still exceeds limit, hard-split it
     const result: string[] = [];
     for (const c of chunks) {
       if (c.length <= limit) {
@@ -108,7 +122,6 @@ function chunk(
     return result;
   }
 
-  // Length mode: hard split
   const chunks: string[] = [];
   for (let i = 0; i < text.length; i += limit) {
     chunks.push(text.slice(i, i + limit));
@@ -119,7 +132,7 @@ function chunk(
 // --- MCP Server ---
 
 const server = new Server(
-  { name: "sms", version: "0.0.1" },
+  { name: "sms", version: "0.1.0" },
   {
     capabilities: {
       experimental: {
@@ -230,7 +243,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let lastId: number = 0;
         for (const chunkText of chunks) {
           if (mediaUrls.length > 0 && chunkText === chunks[chunks.length - 1]) {
-            // Attach media to the last chunk only
             await provider.sendMMS(chatId, chunkText, mediaUrls);
           } else {
             await provider.sendSMS(chatId, chunkText);
@@ -269,6 +281,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         timestamp: m.timestamp,
         direction: m.direction,
         phone: m.phone,
+        did: m.did || undefined,
         message: m.message,
         media: m.media || undefined,
       }));
@@ -309,8 +322,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       const files = msg.media.split(",").filter(Boolean);
       const result = files.map((f) => {
-        const name = f.split("/").pop() || f;
-        return { path: f, name };
+        const fileName = f.split("/").pop() || f;
+        return { path: f, name: fileName };
       });
 
       return {
@@ -338,19 +351,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 
 function startPolling(): void {
-  // Initialize DB
   getDb();
+
+  // Register this session
+  registerSession(SESSION_ID, SUBSCRIBE_DIDS);
+  log(`Session registered: ${SESSION_ID}, DIDs: ${SUBSCRIBE_DIDS?.join(",") || "all"}`);
 
   pollInterval = setInterval(() => {
     try {
-      const rows = fetchUndelivered();
+      const rows = fetchUndeliveredForSession(SESSION_ID, SUBSCRIBE_DIDS);
+      const deliveredIds: number[] = [];
 
       for (const row of rows) {
         const gateResult = gate(row.phone);
 
         if (gateResult.action === "drop") {
-          // Blocked or not allowed — mark as blocked for retention purge
           markBlocked(row.id);
+          deliveredIds.push(row.id); // Track so we don't reprocess
           continue;
         }
 
@@ -367,7 +384,7 @@ function startPolling(): void {
                   : "deny",
               },
             });
-            markDelivered(row.id);
+            deliveredIds.push(row.id);
             continue;
           }
         }
@@ -381,17 +398,14 @@ function startPolling(): void {
           ts: row.timestamp,
         };
 
-        // Which local number received this message
         if (row.did) {
           meta.did = row.did;
         }
 
-        // Owner flag
         if (gateResult.trust === "owner") {
           meta.owner = "true";
         }
 
-        // Attachment info
         if (row.media) {
           const files = row.media.split(",").filter(Boolean);
           meta.attachment_count = String(files.length);
@@ -405,8 +419,13 @@ function startPolling(): void {
           params: { content: row.message || "(attachment)", meta },
         });
 
-        markDelivered(row.id);
+        deliveredIds.push(row.id);
         log(`Delivered message ${row.id} from ${row.phone}`);
+      }
+
+      // Batch record all deliveries
+      if (deliveredIds.length > 0) {
+        recordDeliveryBatch(SESSION_ID, deliveredIds);
       }
     } catch (err) {
       log(`Polling error: ${err}`);
@@ -416,7 +435,6 @@ function startPolling(): void {
 
 // --- Permission request handler ---
 
-// Listen for permission requests from Claude Code and forward to owner via SMS
 server.setNotificationHandler(
   { method: "notifications/claude/channel/permission_request" },
   async (notification) => {
@@ -456,7 +474,6 @@ async function main(): Promise<void> {
   startPolling();
   log("MCP server ready, polling for messages");
 
-  // Graceful shutdown on stdin EOF or signals
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 
@@ -469,11 +486,11 @@ async function main(): Promise<void> {
 function shutdown(): void {
   log("Shutting down MCP server");
   if (pollInterval) clearInterval(pollInterval);
+  deactivateSession(SESSION_ID);
   closeDb();
   process.exit(0);
 }
 
-// Unhandled rejection protection
 process.on("unhandledRejection", (err) => {
   log(`Unhandled rejection: ${err}`);
 });
