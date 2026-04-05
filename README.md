@@ -1,303 +1,331 @@
+<p align="center">
+  <img src="https://img.shields.io/badge/Claude_Code-channel_plugin-7C3AED?style=for-the-badge" alt="Claude Code channel plugin" />
+  <img src="https://img.shields.io/badge/SMS_%2F_MMS-two--way-10B981?style=for-the-badge" alt="Two-way SMS/MMS" />
+  <img src="https://img.shields.io/badge/runtime-Bun-F472B6?style=for-the-badge" alt="Bun" />
+</p>
+
 # claude-code-sms
 
-Claude Code channel plugin for two-way SMS/MMS communication. Send and receive text messages from within a Claude Code session.
+**Give Claude Code a phone number.** People text it, Claude reads it. Claude replies, they get a text. That simple.
 
-## Supported Providers
+A [Claude Code channel plugin](https://docs.anthropic.com/en/docs/claude-code) that bridges SMS/MMS into your coding session — with a trust model, access control, and remote permission relay so you can approve tool calls from your phone.
 
-| Provider | Status | Docs |
-|----------|--------|------|
-| [voip.ms](https://voip.ms) | Tested | [voip.ms API](https://voip.ms/m/apidocs.php) |
-| [Twilio](https://www.twilio.com) | Untested | [Twilio Messaging API](https://www.twilio.com/docs/messaging/api) |
-| [Vonage](https://www.vonage.com) (Nexmo) | Untested | [Vonage SMS API](https://developer.vonage.com/en/messaging/sms/overview) |
-| [Telnyx](https://telnyx.com) | Untested | [Telnyx Messaging](https://developers.telnyx.com/docs/messaging/messages) |
-| [Plivo](https://www.plivo.com) | Untested | [Plivo Message API](https://www.plivo.com/docs/sms/api/message) |
+---
 
-Set `SMS_PROVIDER` in your `.env` to choose a provider (default: `voipms`).
-
-## Overview
-
-This plugin gives Claude Code a phone number. People can text it, and Claude Code receives those messages as channel notifications. Claude Code can reply via SMS/MMS using the `send` tool.
-
-**Key features:**
-- Two-way SMS/MMS with pluggable provider support
-- Owner phone number with full trust (including remote permission approve/deny)
-- Allowlist + blocklist with wildcard pattern support
-- Persistent webhook listener — no messages lost when Claude Code isn't running
-- MMS media download and storage
-- Message history in SQLite
-
-## Architecture
-
-Two-process design to ensure no messages are ever lost:
+## How It Works
 
 ```
-SMS provider webhook --> Cloudflare tunnel --> Webhook Listener (always on, systemd)
-                                                    |
-                                                    v writes
-                                               SQLite DB
-                                                    |
-                                                    v polls (1.5s)
-                                               MCP Server (runs with Claude Code)
-                                                    |
-                                                    v
-                                  notifications/claude/channel --> Claude Code
-
-Claude Code --> send tool --> SMS provider API --> recipient phone
-                           --> also writes to SQLite DB
+You text +1 (647) 483-7416          Claude Code sees your message
+        |                                      |
+        v                                      v
+  SMS Provider ──webhook──> Listener ──db──> MCP Server ──notify──> Claude
+                                                                      |
+  You get a reply  <──sms──  Provider  <──api──  send tool  <─────────┘
 ```
 
-### Webhook Listener (`listener.ts`)
+Two processes, one database:
 
-Always-on HTTP server running as a systemd user service. Receives incoming SMS/MMS webhooks from your provider (via Cloudflare tunnel), delegates validation to the provider module, downloads MMS media, deduplicates, and writes to SQLite.
+| Component | Role | Lifecycle |
+|-----------|------|-----------|
+| **Webhook Listener** | Catches inbound SMS/MMS, stores in SQLite | Always on (systemd / launchd) |
+| **MCP Server** | Polls DB, notifies Claude Code, sends replies | Runs with Claude Code |
 
-**Why separate?** Most providers fire webhooks once with no retry. If we only listened when Claude Code was running, messages received while it's down would be permanently lost.
+**Why two processes?** Most SMS providers fire webhooks once with no retry. The listener runs 24/7 so nothing is lost — the MCP server catches up when Claude Code starts.
 
-### MCP Server (`server.ts`)
-
-Spawned by Claude Code as a subprocess over stdio. Polls the SQLite database for undelivered inbound messages and emits them as MCP channel notifications. Exposes tools for sending SMS/MMS and fetching history.
+---
 
 ## Trust Model
 
-Three tiers of phone numbers:
+Every phone number falls into one of three tiers:
 
-| Tier | Source | Behavior |
-|------|--------|----------|
-| **Owner** | `OWNER_PHONE` in `.env` | Full trust. Permission relay (approve/deny tool calls via text). Messages tagged with `owner="true"` in notification meta. |
-| **Allowlisted** | `allowFrom` in `access.json` | Untrusted. Messages delivered to Claude Code with E.164 phone only, no special flags. Claude Code should not act on instructions from these numbers without owner approval. |
-| **Blocklisted** | `blockList` in `access.json` | Silently dropped. Stored in DB for audit but never delivered to Claude Code. |
-| **Unknown** | Not in any list | Dropped (or enters pairing flow if configured). |
+| | Owner | Allowlisted | Blocked |
+|---|---|---|---|
+| **Configured in** | `OWNER_PHONE` in `.env` | `allowFrom` in `access.json` | `blockList` in `access.json` |
+| **Messages delivered?** | Yes, with `owner: "true"` flag | Yes, no special flags | No (stored for audit only) |
+| **Can approve permissions?** | Yes | No | No |
+| **Claude trusts instructions?** | Yes | No — requires owner approval | N/A |
 
-Both allowlist and blocklist support glob wildcards on E.164 numbers (e.g., `+1416*` matches all Toronto 416 numbers).
+Wildcards supported: `+1416*` matches all Toronto 416 numbers.
 
-## Setup
+---
 
-### Prerequisites
+## Providers
 
-- [Bun](https://bun.sh) runtime
-- An account with a [supported SMS provider](#supported-providers)
-- A Cloudflare tunnel (or similar) to expose the webhook listener to the internet
-- macOS or Linux (systemd for the listener service)
+Bring your own phone number from any of these providers:
 
-### 1. Install dependencies
+| Provider | `SMS_PROVIDER` value | Status |
+|----------|---------------------|--------|
+| [voip.ms](https://voip.ms) | `voipms` | **Tested** |
+| [Twilio](https://www.twilio.com) | `twilio` | Untested |
+| [Vonage](https://www.vonage.com) | `vonage` | Untested |
+| [Telnyx](https://telnyx.com) | `telnyx` | Untested |
+| [Plivo](https://www.plivo.com) | `plivo` | Untested |
+
+Adding a provider? See [Contributing a Provider](#contributing-a-provider) below.
+
+---
+
+## Quick Start
+
+### 1. Clone and install
 
 ```bash
+git clone https://github.com/mattstein111/claude-code-sms.git
 cd claude-code-sms
 bun install
 ```
 
-### 2. Configure credentials
+### 2. Configure
 
-Run `/sms:configure` in a Claude Code session, or manually create `~/.claude/channels/sms/.env`:
+The easiest way is the built-in skill — run `/sms:configure` inside Claude Code. It walks you through everything.
+
+Or do it manually:
 
 ```bash
-mkdir -p ~/.claude/channels/sms
-chmod 700 ~/.claude/channels/sms
+mkdir -p ~/.claude/channels/sms && chmod 700 ~/.claude/channels/sms
 ```
 
-Then create `~/.claude/channels/sms/.env` (chmod 600) with your provider's settings:
-
-<details>
-<summary><strong>voip.ms</strong></summary>
+Create `~/.claude/channels/sms/.env` (chmod 600):
 
 ```env
-SMS_PROVIDER=voipms
-VOIPMS_USER=user@example.com
-VOIPMS_API_PASSWORD=your_api_password
-VOIPMS_DID=6474837416
-OWNER_PHONE=+14165551234
-SMS_WEBHOOK_TOKEN=your_webhook_secret
-SMS_WEBHOOK_PATH=/sms-secret123/incoming
+SMS_PROVIDER=voipms           # or twilio, vonage, telnyx, plivo
+OWNER_PHONE=+14165551234      # your phone — gets full trust
+SMS_WEBHOOK_TOKEN=<random>    # openssl rand -hex 24
+SMS_WEBHOOK_PATH=/incoming    # obscure this in production
 LISTEN_PORT=5090
+
+# ... plus provider-specific vars (see Provider Configuration below)
 ```
-
-Webhook setup: In the voip.ms portal, go to **DID Numbers** > **Manage DID** > Edit your DID. Under **SMS/MMS**, set the **URL Callback** to `https://your-tunnel.com/sms-secret123/incoming?token=your_webhook_secret`.
-</details>
-
-<details>
-<summary><strong>Twilio</strong></summary>
-
-```env
-SMS_PROVIDER=twilio
-TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_AUTH_TOKEN=your_auth_token
-TWILIO_PHONE_NUMBER=+14165551234
-OWNER_PHONE=+14165559999
-SMS_WEBHOOK_TOKEN=optional_extra_token
-SMS_WEBHOOK_PATH=/incoming
-LISTEN_PORT=5090
-```
-
-Webhook setup: In the Twilio console, go to your phone number's settings and set the **A MESSAGE COMES IN** webhook URL to `https://your-tunnel.com/incoming?token=your_token`. Twilio also validates via `X-Twilio-Signature` header.
-</details>
-
-<details>
-<summary><strong>Vonage (Nexmo)</strong></summary>
-
-```env
-SMS_PROVIDER=vonage
-VONAGE_API_KEY=your_api_key
-VONAGE_API_SECRET=your_api_secret
-VONAGE_PHONE_NUMBER=+14165551234
-VONAGE_SIGNATURE_SECRET=optional_signature_secret
-OWNER_PHONE=+14165559999
-SMS_WEBHOOK_TOKEN=your_webhook_secret
-SMS_WEBHOOK_PATH=/incoming
-LISTEN_PORT=5090
-```
-
-Webhook setup: In the Vonage dashboard, configure the inbound message webhook URL for your number.
-</details>
-
-<details>
-<summary><strong>Telnyx</strong></summary>
-
-```env
-SMS_PROVIDER=telnyx
-TELNYX_API_KEY=KEYxxxxxxxxxxxxxxxxxxxxxxxx
-TELNYX_PHONE_NUMBER=+14165551234
-TELNYX_PUBLIC_KEY=your_webhook_public_key
-TELNYX_MESSAGING_PROFILE_ID=optional_profile_id
-OWNER_PHONE=+14165559999
-SMS_WEBHOOK_TOKEN=optional_extra_token
-SMS_WEBHOOK_PATH=/incoming
-LISTEN_PORT=5090
-```
-
-Webhook setup: In the Telnyx Mission Control Portal, set the messaging webhook URL for your number or messaging profile.
-</details>
-
-<details>
-<summary><strong>Plivo</strong></summary>
-
-```env
-SMS_PROVIDER=plivo
-PLIVO_AUTH_ID=your_auth_id
-PLIVO_AUTH_TOKEN=your_auth_token
-PLIVO_PHONE_NUMBER=+14165551234
-PLIVO_SIGNATURE_V3_TOKEN=optional_validation_token
-OWNER_PHONE=+14165559999
-SMS_WEBHOOK_TOKEN=your_webhook_secret
-SMS_WEBHOOK_PATH=/incoming
-LISTEN_PORT=5090
-```
-
-Webhook setup: In the Plivo console, configure the message URL for your number.
-</details>
-
-### 3. Configure access control
 
 Create `~/.claude/channels/sms/access.json`:
 
 ```json
 {
   "dmPolicy": "allowlist",
-  "allowFrom": ["+14165559999"],
-  "blockList": ["+1900*"],
+  "allowFrom": [],
+  "blockList": [],
   "textChunkLimit": 160,
   "chunkMode": "length"
 }
 ```
 
-### 4. Start the webhook listener
-
-**Option A: systemd (recommended for always-on)**
+### 3. Start the webhook listener
 
 ```bash
-# Edit the service file to match your paths
+# Quick test
+bun run listener
+
+# Production (Linux)
 cp systemd/sms-listener.service ~/.config/systemd/user/
-systemctl --user daemon-reload
 systemctl --user enable --now sms-listener
 ```
 
-**Option B: manual**
+Point a Cloudflare tunnel (or ngrok, etc.) at `localhost:5090`.
 
-```bash
-bun run listener
+### 4. Configure your provider's webhook
+
+In your provider's portal, set the inbound message webhook URL to:
+```
+https://your-tunnel.com/<SMS_WEBHOOK_PATH>?token=<SMS_WEBHOOK_TOKEN>
 ```
 
-### 5. Install the Claude Code plugin
+### 5. Use it
 
-The plugin auto-registers via `.claude-plugin/plugin.json` when the repo is in your project directory. Claude Code will spawn the MCP server automatically.
+The plugin auto-registers when Claude Code runs in this directory. Send a text to your number — Claude will see it.
+
+---
+
+## Provider Configuration
+
+Each provider needs its own env vars alongside the common ones above.
+
+<details>
+<summary><strong>voip.ms</strong> (tested)</summary>
+
+```env
+VOIPMS_USER=user@example.com
+VOIPMS_API_PASSWORD=your_api_password    # API password, not account password
+VOIPMS_DID=6474837416                    # your DID, 10-11 digits
+```
+
+**Webhook:** DID Numbers > Manage DID > Edit > SMS/MMS > URL Callback
+
+**Notes:** Uses GET webhooks (unusual). API password is set separately in the voip.ms portal under DIDS > DID Numbers > Manage DID > Edit DID.
+</details>
+
+<details>
+<summary><strong>Twilio</strong> (untested)</summary>
+
+```env
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_auth_token
+TWILIO_PHONE_NUMBER=+14165551234
+```
+
+**Webhook:** Phone number > Messaging > "A MESSAGE COMES IN" URL
+
+**Notes:** Validates inbound webhooks via `X-Twilio-Signature` (HMAC-SHA1). Supports up to 10 media URLs per MMS.
+</details>
+
+<details>
+<summary><strong>Vonage / Nexmo</strong> (untested)</summary>
+
+```env
+VONAGE_API_KEY=your_api_key
+VONAGE_API_SECRET=your_api_secret
+VONAGE_PHONE_NUMBER=+14165551234
+VONAGE_SIGNATURE_SECRET=optional          # for webhook signature validation
+```
+
+**Webhook:** Dashboard > Numbers > Your number > Inbound Webhook URL
+
+**Notes:** Uses SMS API for text, Messages API for MMS. Multi-image MMS sends each image as a separate message.
+</details>
+
+<details>
+<summary><strong>Telnyx</strong> (untested)</summary>
+
+```env
+TELNYX_API_KEY=KEYxxxxxxxxxxxxxxxxxxxxxxxx
+TELNYX_PHONE_NUMBER=+14165551234
+TELNYX_PUBLIC_KEY=optional                # ed25519 webhook verification
+TELNYX_MESSAGING_PROFILE_ID=optional
+```
+
+**Webhook:** Mission Control > Messaging > Number/Profile > Inbound Webhook
+
+**Notes:** Bearer token auth. Native MMS support with `media_urls` array.
+</details>
+
+<details>
+<summary><strong>Plivo</strong> (untested)</summary>
+
+```env
+PLIVO_AUTH_ID=your_auth_id
+PLIVO_AUTH_TOKEN=your_auth_token
+PLIVO_PHONE_NUMBER=+14165551234
+PLIVO_SIGNATURE_V3_TOKEN=optional         # V3 webhook validation
+```
+
+**Webhook:** Console > Messaging > Applications > Message URL
+
+**Notes:** Basic auth. Phone numbers sent without `+` prefix internally.
+</details>
+
+---
 
 ## Tools
 
+Claude Code gets three tools from this plugin:
+
 ### `send`
+Send an SMS or MMS.
 
-Send an SMS or MMS message.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `chat_id` | string | yes | Phone number in E.164 format |
-| `text` | string | yes | Message text |
-| `media_urls` | string[] | no | Public URLs for MMS (max varies by provider) |
+```
+chat_id:    "+14165551234"           # required — E.164 phone number
+text:       "Build passed!"          # required — message body
+media_urls: ["https://..."]          # optional — public URLs, max 1300KB each
+```
 
 ### `fetch_messages`
+Pull conversation history.
 
-Fetch conversation history with a phone number.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `phone` | string | yes | Phone number in E.164 format |
-| `limit` | number | no | Max messages (default 30) |
+```
+phone:  "+14165551234"               # required — E.164 phone number
+limit:  30                           # optional — default 30, oldest first
+```
 
 ### `download_attachment`
+Get local file paths for MMS media.
 
-Get local file paths for MMS media on a message.
+```
+message_id: "42"                     # required — DB message ID
+```
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `message_id` | string | yes | Message ID from the database |
-
-## Skills
-
-- `/sms:configure` — Set up SMS provider credentials and webhook settings
-- `/sms:access` — Manage phone allowlist, blocklist, and pairing approvals
+---
 
 ## Permission Relay
 
-The owner can approve or deny Claude Code tool calls via text message:
+Approve or deny Claude Code tool calls from your phone:
 
-1. Claude Code requests permission to run a tool
-2. The MCP server sends an SMS to the owner: `[Permission] Claude wants to: Run npm install. Reply "yes abcde" or "no abcde"`
-3. Owner replies `yes abcde` or `no abcde`
-4. The MCP server intercepts the reply and emits a permission notification back to Claude Code
+```
+                           ┌──────────────────────────────────────────────┐
+Claude wants to run        │  [Permission] Claude wants to: Run npm      │
+  Bash: npm install   ──>  │  install. Reply "yes abcde" or "no abcde"  │
+                           └──────────────────────────────────────────────┘
+                                              your phone
 
-Only the owner phone number can approve/deny permissions. Permission replies from other numbers are ignored.
+You reply: "yes abcde"  ──>  Claude proceeds with npm install
+```
 
-## Directory Layout
+Only the owner phone can approve permissions. Replies from other numbers are silently ignored.
+
+---
+
+## Skills
+
+| Skill | Description |
+|-------|-------------|
+| `/sms:configure` | Interactive setup — provider, credentials, webhook, access control |
+| `/sms:access` | Manage allowlist, blocklist, and pairing approvals |
+
+`/sms:access` subcommands: `list`, `allow <phone>`, `block <phone>`, `remove <phone>`, `policy <allowlist\|disabled>`, `pair <code>`
+
+---
+
+## Data Directory
+
+Everything lives under `~/.claude/channels/sms/`:
 
 ```
 ~/.claude/channels/sms/
-├── .env                    # Provider credentials (chmod 600)
-├── access.json             # Phone allowlist + blocklist
-├── sms.db                  # SQLite message database
-├── media/                  # Downloaded MMS attachments
-├── approved/               # Pairing approval marker files
+├── .env              # Credentials (chmod 600)
+├── access.json       # Allowlist + blocklist
+├── sms.db            # SQLite message history
+├── media/            # Downloaded MMS attachments
+├── approved/         # Pairing approval markers
 └── logs/
-    └── listener.log        # Webhook listener log
+    └── listener.log  # Webhook listener log (JSON lines)
 ```
 
-## Adding a Provider
+---
 
-The provider interface is defined in `providers/interface.ts`. To add a new provider:
+## Contributing a Provider
 
-1. Create `providers/<name>.ts` implementing `SmsProvider`
+The provider interface (`providers/interface.ts`) is intentionally small:
+
+```typescript
+interface SmsProvider {
+  name: string
+  webhookMethod: "GET" | "POST" | "GET|POST"
+  validateConfig(): void
+  sendSMS(to: string, message: string): Promise<SendResult>
+  sendMMS(to: string, message: string, mediaUrls: string[]): Promise<SendResult>
+  parseWebhook(req: Request): Promise<InboundMessage | null>
+  fetchMedia(providerMessageId: string): Promise<string[]>
+}
+```
+
+To add a provider:
+
+1. Create `providers/<name>.ts` — typically 50-100 lines
 2. Register it in `providers/index.ts`
-3. Document required env vars in the README and `/sms:configure` skill
+3. Document the required env vars
 
-Each provider implements: `sendSMS`, `sendMMS`, `parseWebhook`, `fetchMedia`, and `validateConfig`.
+Phone numbers arrive as E.164 (`+14165551234`). Your provider converts to whatever format its API needs internally.
 
-## Development
-
-```bash
-bun run listener    # start webhook listener
-bun run server      # MCP server (normally spawned by Claude Code)
-```
+---
 
 ## Known Limitations
 
-- Claude Code channels are a **research preview** (launched March 2026). There are known bugs with notification delivery.
-- Most providers fire webhooks once with no retry — the persistent listener mitigates this, but if the listener is down during a webhook, that message is lost.
-- MMS media URLs for outbound messages must be publicly accessible (the provider fetches them). The plugin does not host media.
-- SMS messages are chunked at 160 characters by default. Long messages become multiple texts.
-- Twilio, Vonage, Telnyx, and Plivo provider implementations are **untested** — see GitHub issues for status.
+- **Claude Code channels are a research preview** (March 2026). Notification delivery has known bugs.
+- **Webhook reliability** — if the listener is down when a webhook fires, that message is lost. Most providers don't retry.
+- **Outbound MMS** requires publicly accessible media URLs. The plugin doesn't host files.
+- **Long messages** are chunked at 160 characters by default (configurable via `textChunkLimit`).
+- **Twilio, Vonage, Telnyx, and Plivo** providers are implemented but untested — see [GitHub issues](https://github.com/mattstein111/claude-code-sms/issues) for status.
+
+---
+
+## License
+
+Private. Not yet licensed for distribution.
