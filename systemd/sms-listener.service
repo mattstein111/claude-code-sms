@@ -1,0 +1,40 @@
+# systemd user service for the SMS webhook listener.
+#
+# Install:
+#   cp sms-listener.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sms-listener
+#
+# Logs:
+#   journalctl --user -u sms-listener -f
+#   Also writes to ~/.claude/channels/sms/logs/listener.log
+#
+# Requires: Bun runtime, Cloudflare tunnel pointing to LISTEN_PORT
+
+[Unit]
+Description=SMS Webhook Listener for Claude Code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/claude-code-sms
+ExecStart=/usr/local/bin/bun run listener.ts
+Restart=always
+RestartSec=5
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Environment
+Environment=HOME=%h
+Environment=SMS_STATE_DIR=%h/.claude/channels/sms
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sms-listener
+
+[Install]
+WantedBy=default.target

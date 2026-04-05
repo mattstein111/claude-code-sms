@@ -1,0 +1,11 @@
+{
+  "name": "sms",
+  "version": "0.0.1",
+  "description": "Two-way SMS/MMS channel via voip.ms",
+  "channel": true,
+  "mcp": {
+    "command": "bun",
+    "args": ["run", "server.ts"],
+    "cwd": "."
+  }
+}
