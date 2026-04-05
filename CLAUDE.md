@@ -1,19 +1,33 @@
 # claude-code-sms
 
-Claude Code channel plugin for two-way SMS/MMS via voip.ms.
+Claude Code channel plugin for two-way SMS/MMS with pluggable provider support.
 
 ## Architecture
 
 Two-process design:
-1. **Webhook listener** (`listener.ts`) — always-on systemd service. Receives voip.ms webhooks, validates token, downloads MMS media, writes to SQLite. Must run independently so no messages are lost.
+1. **Webhook listener** (`listener.ts`) — always-on systemd service. Receives provider webhooks, validates via provider module, downloads MMS media, writes to SQLite. Must run independently so no messages are lost.
 2. **MCP server** (`server.ts`) — spawned by Claude Code over stdio. Polls SQLite for undelivered inbound messages, emits channel notifications, exposes tools for sending SMS/MMS.
 
 They share a SQLite database at `~/.claude/channels/sms/sms.db`.
 
+## Providers
+
+Provider implementations live in `providers/`. Set `SMS_PROVIDER` in `.env` to select one.
+
+| Provider | File | Status |
+|----------|------|--------|
+| voip.ms | `providers/voipms.ts` | Tested |
+| Twilio | `providers/twilio.ts` | Untested |
+| Vonage | `providers/vonage.ts` | Untested |
+| Telnyx | `providers/telnyx.ts` | Untested |
+| Plivo | `providers/plivo.ts` | Untested |
+
+Interface: `providers/interface.ts`. Registry: `providers/index.ts`.
+
 ## Configuration
 
 All state lives under `~/.claude/channels/sms/`:
-- `.env` — voip.ms credentials, webhook token, owner phone number
+- `.env` — SMS_PROVIDER + provider-specific credentials, webhook token, owner phone
 - `access.json` — allowlist/blocklist with wildcard support
 - `sms.db` — message database
 - `media/` — downloaded MMS attachments
@@ -21,10 +35,10 @@ All state lives under `~/.claude/channels/sms/`:
 ## Key conventions
 
 - Phone numbers are E.164 everywhere (`+14165551234`)
-- voip.ms API wants 11 digits without `+` prefix
+- Each provider converts to its own format internally (e.g. voip.ms strips `+`)
 - All stdout is reserved for MCP protocol — debug logging goes to stderr
 - Owner phone (in `.env`) has full trust including permission relay
-- All other numbers are untrusted — messages delivered but flagged
+- All other numbers are untrusted — messages delivered with E.164 phone only
 - Blocklisted numbers are stored in DB for audit but never delivered to Claude Code
 - Allowlist/blocklist support glob wildcards (e.g. `+1416*`)
 

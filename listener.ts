@@ -1,17 +1,17 @@
 /**
- * Webhook listener — persistent HTTP server for inbound SMS/MMS from voip.ms.
+ * Webhook listener — persistent HTTP server for inbound SMS/MMS.
  *
  * Runs independently of Claude Code as a systemd service so no messages
- * are lost when Claude Code isn't running. voip.ms fires webhooks once
- * with no retry, so this must always be up.
+ * are lost when Claude Code isn't running. Most providers fire webhooks
+ * once with no retry, so this must always be up.
  *
- * Receives: GET requests at the configured webhook path with query params
- *   - to, from, message, id, media, plus the webhook token
+ * Provider-agnostic: uses the SmsProvider interface to parse webhooks
+ * and fetch media. The active provider is set via SMS_PROVIDER env var.
  *
  * Responsibilities:
- *   1. Validate webhook token
+ *   1. Validate webhook authenticity (delegated to provider)
  *   2. Normalize phone numbers
- *   3. Deduplicate on voip.ms message ID
+ *   3. Deduplicate on provider message ID
  *   4. Download MMS media to local storage
  *   5. Write message row to SQLite
  *   6. Log everything to logs/listener.log
@@ -23,8 +23,9 @@
 import { join } from "path";
 import { mkdirSync, appendFileSync, existsSync } from "fs";
 import { normalizePhone } from "./phone";
-import { getDb, insertInbound } from "./db";
-import { getMMS } from "./voipms";
+import { getDb, insertInbound, closeDb } from "./db";
+import { getProvider } from "./providers/index";
+import type { InboundMessage } from "./providers/interface";
 
 // --- Configuration ---
 
@@ -46,21 +47,19 @@ if (existsSync(ENV_PATH)) {
   }
 }
 
-const WEBHOOK_TOKEN = process.env.SMS_WEBHOOK_TOKEN;
 const WEBHOOK_PATH = process.env.SMS_WEBHOOK_PATH || "/incoming";
 const LISTEN_PORT = parseInt(process.env.LISTEN_PORT || "5090", 10);
 const MEDIA_DIR = join(STATE_DIR, "media");
 const LOG_DIR = join(STATE_DIR, "logs");
 const LOG_PATH = join(LOG_DIR, "listener.log");
 
-if (!WEBHOOK_TOKEN) {
-  console.error("FATAL: SMS_WEBHOOK_TOKEN not set in .env");
-  process.exit(1);
-}
-
 // Ensure directories exist
 mkdirSync(MEDIA_DIR, { recursive: true });
 mkdirSync(LOG_DIR, { recursive: true });
+
+// --- Initialize provider ---
+
+const provider = getProvider();
 
 // --- Logging ---
 
@@ -81,7 +80,7 @@ function log(level: string, msg: string, data?: Record<string, unknown>): void {
 
 async function downloadMedia(
   urls: string[],
-  voipmsId: string
+  messageId: string
 ): Promise<string[]> {
   const localPaths: string[] = [];
 
@@ -98,7 +97,9 @@ async function downloadMedia(
 
       const contentType = resp.headers.get("content-type") || "application/octet-stream";
       const ext = contentType.split("/").pop()?.split(";")[0] || "bin";
-      const filename = `${voipmsId}_${i}.${ext}`;
+      // Sanitize messageId for use in filenames
+      const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const filename = `${safeId}_${i}.${ext}`;
       const filePath = join(MEDIA_DIR, filename);
 
       const buffer = await resp.arrayBuffer();
@@ -114,30 +115,14 @@ async function downloadMedia(
   return localPaths;
 }
 
-/**
- * Attempt to fetch MMS media via the voip.ms getMMS API.
- * Fallback when the webhook doesn't include media URLs.
- */
-async function fetchMmsMedia(voipmsId: string): Promise<string[]> {
-  try {
-    const resp = await getMMS(voipmsId);
-    const media = resp.media as string | undefined;
-    if (media) {
-      return media.split(",").filter(Boolean);
-    }
-  } catch (err) {
-    log("error", "getMMS API fallback failed", {
-      voipmsId,
-      error: String(err),
-    });
-  }
-  return [];
-}
-
 // --- Initialize DB ---
 
 getDb();
-log("info", "Webhook listener starting", { port: LISTEN_PORT, path: WEBHOOK_PATH });
+log("info", "Webhook listener starting", {
+  port: LISTEN_PORT,
+  path: WEBHOOK_PATH,
+  provider: provider.name,
+});
 
 // --- HTTP Server ---
 
@@ -149,7 +134,10 @@ const server = Bun.serve({
 
     // Health check
     if (url.pathname === "/health") {
-      return new Response("ok", { status: 200 });
+      return new Response(JSON.stringify({ status: "ok", provider: provider.name }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     // Only accept the configured webhook path
@@ -157,30 +145,32 @@ const server = Bun.serve({
       return new Response("not found", { status: 404 });
     }
 
-    // Only GET (voip.ms sends GET webhooks)
-    if (req.method !== "GET") {
+    // Check HTTP method against what the provider expects
+    const allowedMethods = provider.webhookMethod.split("|");
+    if (!allowedMethods.includes(req.method)) {
       return new Response("method not allowed", { status: 405 });
     }
 
-    // Validate webhook token
-    const token = url.searchParams.get("token");
-    if (token !== WEBHOOK_TOKEN) {
-      log("warn", "Invalid webhook token", {
+    // Delegate parsing and validation to the provider
+    // Clone the request so the provider can read the body
+    let inbound: InboundMessage | null;
+    try {
+      inbound = await provider.parseWebhook(req);
+    } catch (err) {
+      log("error", "Webhook parse error", { error: String(err) });
+      return new Response("bad request", { status: 400 });
+    }
+
+    if (!inbound) {
+      log("warn", "Webhook rejected by provider", {
         remote: req.headers.get("x-forwarded-for") || "unknown",
       });
       return new Response("unauthorized", { status: 401 });
     }
 
-    // Return 200 immediately — voip.ms doesn't retry
+    // Return 200 immediately — most providers don't retry
     // Process asynchronously
-    const from = url.searchParams.get("from") || "";
-    const to = url.searchParams.get("to") || "";
-    const message = decodeURIComponent(url.searchParams.get("message") || "");
-    const voipmsId = url.searchParams.get("id") || "";
-    const mediaParam = url.searchParams.get("media") || "";
-
-    // Fire and forget — process in background
-    processWebhook(from, to, message, voipmsId, mediaParam).catch((err) => {
+    processInbound(inbound).catch((err) => {
       log("error", "Webhook processing error", { error: String(err) });
     });
 
@@ -188,51 +178,49 @@ const server = Bun.serve({
   },
 });
 
-async function processWebhook(
-  from: string,
-  to: string,
-  message: string,
-  voipmsId: string,
-  mediaParam: string
-): Promise<void> {
-  const phone = normalizePhone(from);
+async function processInbound(msg: InboundMessage): Promise<void> {
+  const phone = normalizePhone(msg.from);
 
   log("info", "Inbound message", {
     from: phone,
-    to,
-    voipmsId,
-    hasMedia: !!mediaParam,
-    messageLength: message.length,
+    to: msg.to,
+    providerMessageId: msg.providerMessageId,
+    hasMedia: msg.mediaUrls.length > 0,
+    messageLength: msg.message.length,
   });
 
-  // Resolve media URLs
-  let mediaUrls: string[] = [];
-  if (mediaParam) {
-    mediaUrls = mediaParam.split(",").filter(Boolean);
-  }
-
-  // Fallback: try getMMS API if no media in webhook but ID suggests MMS
-  if (mediaUrls.length === 0 && voipmsId) {
-    mediaUrls = await fetchMmsMedia(voipmsId);
+  // If no media in webhook, try provider's fetchMedia fallback
+  let mediaUrls = msg.mediaUrls;
+  if (mediaUrls.length === 0 && msg.providerMessageId) {
+    try {
+      mediaUrls = await provider.fetchMedia(msg.providerMessageId);
+    } catch (err) {
+      log("error", "fetchMedia fallback failed", {
+        providerMessageId: msg.providerMessageId,
+        error: String(err),
+      });
+    }
   }
 
   // Download media locally
   let localMediaPaths: string[] = [];
   if (mediaUrls.length > 0) {
-    localMediaPaths = await downloadMedia(mediaUrls, voipmsId);
+    localMediaPaths = await downloadMedia(mediaUrls, msg.providerMessageId);
   }
 
-  // Insert to database (deduplicates on voipms_id)
+  // Insert to database (deduplicates on provider message ID)
   const rowId = insertInbound(
     phone,
-    message,
-    voipmsId,
+    msg.message,
+    msg.providerMessageId,
     localMediaPaths.join(","),
     new Date().toISOString()
   );
 
   if (rowId === null) {
-    log("info", "Duplicate webhook, skipped", { voipmsId });
+    log("info", "Duplicate webhook, skipped", {
+      providerMessageId: msg.providerMessageId,
+    });
     return;
   }
 
@@ -248,7 +236,6 @@ async function processWebhook(
 function shutdown() {
   log("info", "Shutting down webhook listener");
   server.stop();
-  const { closeDb } = require("./db");
   closeDb();
   process.exit(0);
 }
@@ -259,5 +246,6 @@ process.on("SIGINT", shutdown);
 log("info", "Webhook listener ready", {
   port: LISTEN_PORT,
   path: WEBHOOK_PATH,
+  provider: provider.name,
 });
-console.log(`SMS webhook listener running on port ${LISTEN_PORT}`);
+console.log(`SMS webhook listener running on port ${LISTEN_PORT} (provider: ${provider.name})`);

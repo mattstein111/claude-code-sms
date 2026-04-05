@@ -32,7 +32,7 @@ import {
   fetchMessages,
   getMessage,
 } from "./db";
-import { sendSMS, sendMMS } from "./voipms";
+import { getProvider } from "./providers/index";
 import { gate, getOwnerPhone, readAccess } from "./access";
 
 // --- Load .env from state directory ---
@@ -53,6 +53,10 @@ if (existsSync(ENV_PATH)) {
     process.env[key] = value;
   }
 }
+
+// --- Initialize provider ---
+
+const provider = getProvider();
 
 // --- Logging (stderr only — stdout is MCP protocol) ---
 
@@ -226,9 +230,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         for (const chunkText of chunks) {
           if (mediaUrls.length > 0 && chunkText === chunks[chunks.length - 1]) {
             // Attach media to the last chunk only
-            await sendMMS(chatId, chunkText, mediaUrls);
+            await provider.sendMMS(chatId, chunkText, mediaUrls);
           } else {
-            await sendSMS(chatId, chunkText);
+            await provider.sendSMS(chatId, chunkText);
           }
           lastId = insertOutbound(chatId, chunkText, mediaUrls.join(","));
         }
@@ -427,7 +431,7 @@ server.setNotificationHandler(
     const msg = `[Permission] Claude wants to: ${params.description}\nTool: ${params.tool_name}\nReply "yes ${params.request_id}" or "no ${params.request_id}"`;
 
     try {
-      await sendSMS(ownerPhone, msg);
+      await provider.sendSMS(ownerPhone, msg);
       insertOutbound(ownerPhone, msg);
       log(`Permission request ${params.request_id} sent to owner`);
     } catch (err) {
