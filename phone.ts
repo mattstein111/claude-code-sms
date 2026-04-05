@@ -2,7 +2,7 @@
  * Phone number normalization utilities.
  *
  * All internal representation uses E.164 format (+1XXXXXXXXXX).
- * voip.ms API expects 11 digits without the + prefix.
+ * Some providers expect digits without the + prefix.
  */
 
 /**
@@ -21,7 +21,7 @@ export function normalizePhone(raw: string): string {
   return `+${digits}`;
 }
 
-/** Convert E.164 to voip.ms format (11 digits, no +). */
-export function toVoipMs(e164: string): string {
+/** Convert E.164 to digits-only format (strip + prefix). */
+export function toDigits(e164: string): string {
   return e164.replace("+", "");
 }

@@ -33,7 +33,7 @@ export interface SendResult {
 }
 
 export interface SmsProvider {
-  /** Provider name (e.g. "voipms", "twilio"). */
+  /** Provider name (e.g. "twilio", "sinch"). */
   readonly name: string;
 
   /**

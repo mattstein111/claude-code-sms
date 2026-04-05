@@ -25,13 +25,45 @@ Multiple Claude Code sessions on the same machine all see the same inbound messa
 
 Provider implementations live in `providers/`. Set `SMS_PROVIDER` in `.env` to select one.
 
-| Provider | File | Status |
-|----------|------|--------|
-| voip.ms | `providers/voipms.ts` | Tested |
-| Twilio | `providers/twilio.ts` | Untested |
-| Vonage | `providers/vonage.ts` | Untested |
-| Telnyx | `providers/telnyx.ts` | Untested |
-| Plivo | `providers/plivo.ts` | Untested |
+### Dedicated providers (with crypto webhook signature validation)
+
+| Provider | File | Signature | Status |
+|----------|------|-----------|--------|
+| Twilio | `providers/twilio.ts` | HMAC-SHA1 | Untested |
+| Vonage | `providers/vonage.ts` | HMAC-SHA256 | Untested |
+| Telnyx | `providers/telnyx.ts` | ed25519 | Untested |
+| Plivo | `providers/plivo.ts` | HMAC-SHA256 V3 | Untested |
+| MessageBird/Bird | `providers/messagebird.ts` | HMAC-SHA256 JWT | Untested |
+| Sinch | `providers/sinch.ts` | HMAC-SHA256 | Untested |
+
+### Generic provider (`SMS_PROVIDER=other`)
+
+Config-driven provider for any REST-based SMS service. Configure via
+`~/.claude/channels/sms/other-provider.json` (see `other-provider.example.json`).
+Uses token-based webhook auth — no crypto signatures.
+
+Type presets: `basic_json`, `bearer_json`, `apikey_json`, `basic_form`, `query_get`, `custom`.
+
+### Known configurations for generic provider
+
+These providers work (or should work) with `SMS_PROVIDER=other`:
+
+| Provider | Type | Tested? |
+|----------|------|---------|
+| voip.ms | `query_get` | Yes |
+| Bandwidth | `basic_json` | No |
+| ClickSend | `basic_json` | No |
+| BulkSMS | `basic_json` | No |
+| Burst SMS / Transmit SMS | `basic_json` | No |
+| Infobip | `apikey_json` | No |
+| Textmagic | `apikey_json` | No |
+| Kaleyra | `apikey_json` | No |
+| Twilio (token-only) | `basic_form` | No |
+| Telnyx (token-only) | `bearer_json` | No |
+| Plivo (token-only) | `basic_json` | No |
+| Vonage (token-only, SMS) | `basic_json` | No |
+| Sinch (token-only) | `bearer_json` | No |
+| MessageBird (token-only) | `apikey_json` | No |
 
 Interface: `providers/interface.ts`. Registry: `providers/index.ts`.
 
@@ -40,13 +72,14 @@ Interface: `providers/interface.ts`. Registry: `providers/index.ts`.
 All state lives under `~/.claude/channels/sms/`:
 - `.env` — SMS_PROVIDER + provider-specific credentials, webhook token, owner phone
 - `access.json` — allowlist/blocklist with wildcard support
+- `other-provider.json` — config for generic provider (when `SMS_PROVIDER=other`)
 - `sms.db` — message database (shared by all sessions)
 - `media/` — downloaded MMS attachments
 
 ## Key conventions
 
 - Phone numbers are E.164 everywhere (`+14165551234`)
-- Each provider converts to its own format internally (e.g. voip.ms strips `+`)
+- Each provider converts to its own format internally (e.g. some providers strip `+`)
 - All stdout is reserved for MCP protocol — debug logging goes to stderr
 - Owner phone (in `.env`) has full trust including permission relay
 - All other numbers are untrusted — messages delivered with E.164 phone only

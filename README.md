@@ -109,17 +109,54 @@ Both the allowlist and blocklist support glob-style wildcards on E.164 phone num
 
 ## Providers
 
-The plugin is provider-agnostic. Each SMS provider is implemented as a small module (~80 lines) behind a common interface. Set `SMS_PROVIDER` in your `.env` file to choose which one to use.
+The plugin is provider-agnostic. Set `SMS_PROVIDER` in your `.env` file to choose which one to use. There are two ways to connect a provider:
 
-| Provider | `SMS_PROVIDER` value | Status | Webhook method |
-|----------|---------------------|--------|----------------|
-| [voip.ms](https://voip.ms) | `voipms` | **Tested** | GET |
-| [Twilio](https://www.twilio.com) | `twilio` | Untested | POST |
-| [Vonage](https://www.vonage.com) | `vonage` | Untested | POST |
-| [Telnyx](https://telnyx.com) | `telnyx` | Untested | POST |
-| [Plivo](https://www.plivo.com) | `plivo` | Untested | POST |
+### Dedicated providers
 
-Want to add a provider? See [Contributing a Provider](#contributing-a-provider).
+These have their own implementation with **cryptographic webhook signature validation** — the strongest security for inbound webhooks. Covers ~55% of the global CPaaS market.
+
+| Provider | `SMS_PROVIDER` | Signature | Status |
+|----------|---------------|-----------|--------|
+| [Twilio](https://www.twilio.com) | `twilio` | HMAC-SHA1 | Untested |
+| [Vonage](https://www.vonage.com) | `vonage` | HMAC-SHA256 | Untested |
+| [Telnyx](https://telnyx.com) | `telnyx` | ed25519 | Untested |
+| [Plivo](https://www.plivo.com) | `plivo` | HMAC-SHA256 V3 | Untested |
+| [MessageBird / Bird](https://bird.com) | `messagebird` | HMAC-SHA256 JWT | Untested |
+| [Sinch](https://www.sinch.com) | `sinch` | HMAC-SHA256 | Untested |
+
+### Generic provider (`SMS_PROVIDER=other`)
+
+A **config-driven provider** that works with any REST-based SMS service. Instead of writing code, you describe your provider's API shape in a JSON config file. Uses token-based webhook authentication (shared secret in the URL or header). Covers the remaining ~35% of the market.
+
+Set `SMS_PROVIDER=other` and create `~/.claude/channels/sms/other-provider.json` (see `other-provider.example.json` for the format). Pick a type preset that matches your provider's API pattern:
+
+| Type | Auth | Body format | Best for |
+|------|------|-------------|----------|
+| `basic_json` | HTTP Basic | JSON | Bandwidth, ClickSend, BulkSMS, Burst SMS |
+| `bearer_json` | Bearer token | JSON | Sinch, Telnyx, and similar |
+| `apikey_json` | API key header | JSON | Infobip, MessageBird, Kaleyra, Textmagic |
+| `basic_form` | HTTP Basic | Form-encoded | Twilio-like providers |
+| `query_get` | Query params | Query params | voip.ms and similar legacy APIs |
+| `custom` | Manual | Manual | Anything else |
+
+### Known working configurations
+
+These providers have been tested or documented for use with the generic provider:
+
+| Provider | Type | Tested? |
+|----------|------|---------|
+| [voip.ms](https://voip.ms) | `query_get` | **Yes** |
+| [Bandwidth](https://www.bandwidth.com) | `basic_json` | No |
+| [ClickSend](https://www.clicksend.com) | `basic_json` | No |
+| [BulkSMS](https://www.bulksms.com) | `basic_json` | No |
+| [Burst SMS](https://www.transmitsms.com) | `basic_json` | No |
+| [Infobip](https://www.infobip.com) | `apikey_json` | No |
+| [Textmagic](https://www.textmagic.com) | `apikey_json` | No |
+| [Kaleyra](https://www.kaleyra.com) | `apikey_json` | No |
+
+The dedicated providers (Twilio, Vonage, etc.) can also be used via the generic provider if you prefer simplicity over signature validation — just use `SMS_PROVIDER=other` with the appropriate type preset.
+
+Want to add a dedicated provider with signature validation? See [Contributing a Provider](#contributing-a-provider).
 
 ---
 
@@ -146,7 +183,7 @@ mkdir -p ~/.claude/channels/sms && chmod 700 ~/.claude/channels/sms
 Then create `~/.claude/channels/sms/.env` with your provider credentials. Every setup needs these common variables:
 
 ```env
-SMS_PROVIDER=voipms              # which provider to use (voipms, twilio, vonage, telnyx, plivo)
+SMS_PROVIDER=twilio              # see Providers section for options
 OWNER_PHONE=+14165551234         # your personal phone number in E.164 — gets full trust
 SMS_WEBHOOK_TOKEN=<random>       # secret for validating inbound webhooks (openssl rand -hex 24)
 SMS_WEBHOOK_PATH=/incoming       # URL path the webhook listener accepts — obscure in production
@@ -223,22 +260,10 @@ The plugin auto-registers via `.claude-plugin/plugin.json` when Claude Code runs
 
 Each provider requires its own set of environment variables in addition to the common ones. Click to expand:
 
-<details>
-<summary><strong>voip.ms</strong> (tested)</summary>
-
-```env
-VOIPMS_USER=user@example.com
-VOIPMS_API_PASSWORD=your_api_password    # API password, not your account password
-VOIPMS_DID=6474837416                    # your DID, 10 or 11 digits
-```
-
-**Webhook setup:** In the voip.ms portal, go to DID Numbers > Manage DID > Edit your DID. Under SMS/MMS, set the URL Callback.
-
-**Notes:** voip.ms is unusual in that it uses GET requests for webhooks (most providers use POST). The API password is set separately from your account password — find it under the API section of the voip.ms portal.
-</details>
+### Dedicated providers
 
 <details>
-<summary><strong>Twilio</strong> (untested)</summary>
+<summary><strong>Twilio</strong></summary>
 
 ```env
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -252,7 +277,7 @@ TWILIO_PHONE_NUMBER=+14165551234
 </details>
 
 <details>
-<summary><strong>Vonage / Nexmo</strong> (untested)</summary>
+<summary><strong>Vonage / Nexmo</strong></summary>
 
 ```env
 VONAGE_API_KEY=your_api_key
@@ -267,7 +292,7 @@ VONAGE_SIGNATURE_SECRET=optional          # for webhook signature validation
 </details>
 
 <details>
-<summary><strong>Telnyx</strong> (untested)</summary>
+<summary><strong>Telnyx</strong></summary>
 
 ```env
 TELNYX_API_KEY=KEYxxxxxxxxxxxxxxxxxxxxxxxx
@@ -282,7 +307,7 @@ TELNYX_MESSAGING_PROFILE_ID=optional
 </details>
 
 <details>
-<summary><strong>Plivo</strong> (untested)</summary>
+<summary><strong>Plivo</strong></summary>
 
 ```env
 PLIVO_AUTH_ID=your_auth_id
@@ -294,6 +319,93 @@ PLIVO_SIGNATURE_V3_TOKEN=optional         # V3 webhook validation
 **Webhook setup:** In the Plivo console, go to Messaging > Applications and set the Message URL.
 
 **Notes:** Uses HTTP Basic authentication. Phone numbers are sent without the `+` prefix in the Plivo API (the plugin handles this conversion internally).
+</details>
+
+<details>
+<summary><strong>MessageBird / Bird</strong></summary>
+
+```env
+MESSAGEBIRD_ACCESS_KEY=your_access_key
+MESSAGEBIRD_PHONE_NUMBER=+14165551234
+MESSAGEBIRD_SIGNING_KEY=optional          # for JWT webhook signature validation
+```
+
+**Webhook setup:** In the MessageBird dashboard, go to Developers > API Settings and configure the webhook URL for inbound messages.
+
+**Notes:** Uses an AccessKey header for API authentication. Webhooks are signed with an HMAC-SHA256 JWT in the `MessageBird-Signature-JWT` header when a signing key is configured. Supports both SMS and MMS.
+</details>
+
+<details>
+<summary><strong>Sinch</strong></summary>
+
+```env
+SINCH_SERVICE_PLAN_ID=your_service_plan_id
+SINCH_API_TOKEN=your_api_token
+SINCH_PHONE_NUMBER=+14165551234
+SINCH_REGION=us                           # optional, default: us
+SINCH_WEBHOOK_SECRET=optional             # for HMAC-SHA256 webhook validation
+```
+
+**Webhook setup:** In the Sinch dashboard, configure the callback URL for your service plan under SMS > APIs.
+
+**Notes:** Uses bearer token authentication. The API region defaults to `us` but can be set to `eu`, `au`, etc. Webhooks are optionally signed with HMAC-SHA256 when a webhook secret is configured.
+</details>
+
+### Generic provider
+
+<details>
+<summary><strong>Generic / Other</strong> (<code>SMS_PROVIDER=other</code>)</summary>
+
+The generic provider uses a JSON configuration file instead of environment variables for API shape. You still need the common env vars (`OWNER_PHONE`, `SMS_WEBHOOK_TOKEN`, etc.) plus any credentials referenced in your config.
+
+1. Copy `other-provider.example.json` to `~/.claude/channels/sms/other-provider.json`
+2. Edit the config to match your provider's API
+3. Set any referenced env vars (credentials) in your `.env`
+
+**Example — voip.ms via generic provider:**
+
+```json
+{
+  "type": "query_get",
+  "name": "voipms",
+  "from_number": "+14165551234",
+  "send": {
+    "url": "https://voip.ms/api/v1/rest.php",
+    "body": {
+      "api_username": "{{env.VOIPMS_USER}}",
+      "api_password": "{{env.VOIPMS_API_PASSWORD}}",
+      "method": "sendSMS",
+      "did": "{{from}}",
+      "dst": "{{to}}",
+      "message": "{{message}}"
+    },
+    "response_id_path": "sms",
+    "phone_format": "digits"
+  },
+  "webhook": {
+    "fields": {
+      "from": "from",
+      "to": "to",
+      "message": "message",
+      "message_id": "id",
+      "media_urls": "media"
+    }
+  }
+}
+```
+
+With `.env`:
+```env
+SMS_PROVIDER=other
+VOIPMS_USER=user@example.com
+VOIPMS_API_PASSWORD=your_api_password
+```
+
+**Template variables:** `{{to}}`, `{{from}}`, `{{message}}` for message fields; `{{env.VAR_NAME}}` for environment variables.
+
+**Phone formats:** `e164` (+14165551234), `digits` (14165551234), `national` (4165551234).
+
+See `other-provider.example.json` for the full schema with all options.
 </details>
 
 ---
@@ -436,13 +548,14 @@ All runtime state lives under `~/.claude/channels/sms/`:
 
 ```
 ~/.claude/channels/sms/
-├── .env              # Provider credentials and config (chmod 600)
-├── access.json       # Allowlist, blocklist, and chunking settings
-├── sms.db            # SQLite database (messages, sessions, deliveries)
-├── media/            # Downloaded MMS attachments
-├── approved/         # Pairing approval marker files
+├── .env                     # Provider credentials and config (chmod 600)
+├── access.json              # Allowlist, blocklist, and chunking settings
+├── other-provider.json      # Generic provider config (when SMS_PROVIDER=other)
+├── sms.db                   # SQLite database (messages, sessions, deliveries)
+├── media/                   # Downloaded MMS attachments
+├── approved/                # Pairing approval marker files
 └── logs/
-    └── listener.log  # Webhook listener log (JSON lines, one entry per line)
+    └── listener.log         # Webhook listener log (JSON lines, one entry per line)
 ```
 
 ---
@@ -470,7 +583,9 @@ To add a new provider:
 2. Import and register it in `providers/index.ts`
 3. Document the required env vars in the README and the `/sms:configure` skill
 
-Phone numbers arrive as E.164 (`+14165551234`). Your provider module converts to whatever format the API expects (e.g., voip.ms strips the `+`, Plivo strips the `+` too, Twilio uses E.164 as-is).
+Phone numbers arrive as E.164 (`+14165551234`). Your provider module converts to whatever format the API expects (e.g., Plivo strips the `+`, Twilio uses E.164 as-is).
+
+> **Note:** Before writing a dedicated provider, check whether the generic provider (`SMS_PROVIDER=other`) can handle your use case. Dedicated providers are only needed when the provider has a bespoke webhook signature scheme that can't be expressed as simple token validation.
 
 ---
 
@@ -480,7 +595,7 @@ Phone numbers arrive as E.164 (`+14165551234`). Your provider module converts to
 - **Webhook reliability** — if the listener process is down when a provider fires a webhook, that message is lost. Most providers do not retry. The systemd service with auto-restart mitigates this.
 - **Outbound MMS** requires that media URLs are publicly accessible on the internet — the SMS provider fetches the media from the URL you provide. This plugin does not host or proxy files.
 - **Long messages** are chunked at 160 characters by default (the standard SMS segment size). This is configurable via `textChunkLimit` in `access.json`.
-- **Twilio, Vonage, Telnyx, and Plivo** providers are implemented based on API documentation but have not been tested with live accounts. See [GitHub issues](https://github.com/mattstein111/claude-code-sms/issues) for testing status.
+- **Dedicated providers** (Twilio, Vonage, Telnyx, Plivo, MessageBird, Sinch) are implemented based on API documentation but have not been tested with live accounts. The generic provider has been tested with voip.ms. See [GitHub issues](https://github.com/mattstein111/claude-code-sms/issues) for testing status.
 
 ---
 

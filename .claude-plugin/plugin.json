@@ -1,7 +1,7 @@
 {
   "name": "sms",
   "version": "0.0.1",
-  "description": "Two-way SMS/MMS channel via voip.ms",
+  "description": "Two-way SMS/MMS channel with pluggable provider support",
   "channel": true,
   "mcp": {
     "command": "bun",

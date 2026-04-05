@@ -1,0 +1,41 @@
+{
+  "_comment": "Generic SMS provider configuration. Copy to ~/.claude/channels/sms/other-provider.json and customize.",
+  "_types": "basic_json | bearer_json | apikey_json | basic_form | query_get | custom",
+
+  "type": "basic_json",
+  "name": "my-provider",
+  "from_number": "+14165551234",
+
+  "send": {
+    "url": "https://api.example.com/v1/messages",
+    "auth": {
+      "username_env": "MY_PROVIDER_USER",
+      "password_env": "MY_PROVIDER_PASSWORD"
+    },
+    "body": {
+      "to": "{{to}}",
+      "from": "{{from}}",
+      "text": "{{message}}"
+    },
+    "mms_media_field": "media_urls",
+    "response_id_path": "id",
+    "phone_format": "e164"
+  },
+
+  "webhook": {
+    "method": "POST",
+    "content_type": "json",
+    "auth": {
+      "type": "token_query",
+      "param": "token",
+      "env_var": "SMS_WEBHOOK_TOKEN"
+    },
+    "fields": {
+      "from": "from",
+      "to": "to",
+      "message": "body",
+      "message_id": "id",
+      "media_urls": "media"
+    }
+  }
+}

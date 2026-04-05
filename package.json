@@ -1,7 +1,7 @@
 {
   "name": "claudecode-sms",
   "version": "0.0.1",
-  "description": "Claude Code channel plugin for two-way SMS/MMS via voip.ms",
+  "description": "Claude Code channel plugin for two-way SMS/MMS with pluggable provider support",
   "type": "module",
   "scripts": {
     "server": "bun run server.ts",

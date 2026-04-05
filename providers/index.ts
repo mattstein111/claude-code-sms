@@ -8,18 +8,22 @@
  */
 
 import type { SmsProvider } from "./interface";
-import { voipmsProvider } from "./voipms";
 import { twilioProvider } from "./twilio";
 import { vonageProvider } from "./vonage";
 import { telnyxProvider } from "./telnyx";
 import { plivoProvider } from "./plivo";
+import { messagebirdProvider } from "./messagebird";
+import { sinchProvider } from "./sinch";
+import { otherProvider } from "./other";
 
 const providers: Record<string, SmsProvider> = {
-  voipms: voipmsProvider,
   twilio: twilioProvider,
   vonage: vonageProvider,
   telnyx: telnyxProvider,
   plivo: plivoProvider,
+  messagebird: messagebirdProvider,
+  sinch: sinchProvider,
+  other: otherProvider,
 };
 
 /** All registered provider names. */
@@ -27,11 +31,11 @@ export const providerNames = Object.keys(providers);
 
 /**
  * Get the configured provider.
- * Reads SMS_PROVIDER env var, defaults to "voipms".
+ * Reads SMS_PROVIDER env var, defaults to "twilio".
  * Validates config on first access.
  */
 export function getProvider(): SmsProvider {
-  const name = (process.env.SMS_PROVIDER || "voipms").toLowerCase();
+  const name = (process.env.SMS_PROVIDER || "twilio").toLowerCase();
   const provider = providers[name];
 
   if (!provider) {
