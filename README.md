@@ -2,13 +2,43 @@
   <img src="https://img.shields.io/badge/Claude_Code-channel_plugin-7C3AED?style=for-the-badge" alt="Claude Code channel plugin" />
   <img src="https://img.shields.io/badge/SMS_%2F_MMS-two--way-10B981?style=for-the-badge" alt="Two-way SMS/MMS" />
   <img src="https://img.shields.io/badge/runtime-Bun-F472B6?style=for-the-badge" alt="Bun" />
+  <img src="https://img.shields.io/badge/status-0.2.3--beta-F59E0B?style=for-the-badge" alt="0.2.3-beta" />
 </p>
 
 # claude-code-sms
 
 **Give Claude Code a phone number.** People text it, Claude reads it. Claude replies, they get a text.
 
-A [Claude Code channel plugin](https://docs.anthropic.com/en/docs/claude-code) that bridges SMS/MMS into your coding session. The owner gets full trust and can approve tool calls from their phone. Other people can text in too — their messages are delivered to Claude but treated as untrusted. Blocked numbers are silently dropped.
+A [Claude Code channel plugin](https://docs.anthropic.com/en/docs/claude-code) that bridges SMS/MMS into your coding session. The owner gets full trust and can approve tool calls from their own phone. Other people can text in too — their messages are delivered to Claude but treated as untrusted.
+
+> **Default-deny.** Unknown numbers never reach Claude Code. You allowlist explicitly. Blocklisted numbers are stored for audit but never delivered.
+
+> **Status:** `0.2.3-beta`. Tested end-to-end with voip.ms. The other providers (Twilio, Vonage, Telnyx, Plivo, MessageBird, Sinch) are implemented from API docs but have not been verified against live accounts — use at your own risk and file an issue with your findings.
+
+---
+
+## What it looks like
+
+When someone texts your number, Claude receives it as a channel notification:
+
+```
+<channel source="sms" chat_id="+14165551234" message_id="42"
+         user="+14165551234" ts="2026-04-16T23:44:49Z" did="+16475551234" owner="true">
+Test message
+</channel>
+```
+
+The `owner="true"` attribute tells Claude the sender is you (not an allowlisted third party). Claude replies via the `send` tool — messages go back to the phone as regular SMS.
+
+**Permission relay** — when Claude asks for permission to run a tool, the request shows up on your phone:
+
+```
+[Permission] Claude wants to: Run npm install.
+Tool: Bash
+Reply "yes 7q3fp" or "no 7q3fp"
+```
+
+Reply `yes 7q3fp` (or `y 7q3fp`) from the owner phone and Claude proceeds. Anything but an exact match from the owner is delivered as a normal message.
 
 ---
 
@@ -47,7 +77,8 @@ The plugin has two components that share a single SQLite database:
 
 **MCP Server** (`server.ts`) — Spawned automatically by Claude Code as a subprocess over stdio. Every 1.5 seconds it polls SQLite for new inbound messages and delivers them to Claude Code as channel notifications. It also exposes tools for Claude to send SMS/MMS and retrieve conversation history.
 
-### Multiple Claude Code Sessions
+<details>
+<summary><strong>Advanced: multi-session and DID subscriptions</strong></summary>
 
 Multiple Claude Code sessions can run on the same machine, each with its own MCP server instance. The database tracks delivery per-session — so if two sessions are running, both will see the same inbound SMS independently.
 
@@ -59,15 +90,16 @@ Each MCP server registers a session on startup with a **stable ID**, derived in 
 
 Stable IDs mean a restart of the same logical consumer resumes where it left off instead of re-reading the full history. A `deliveries` table records which messages each session has already seen, using a high-water mark for efficient polling. When a session shuts down, it's marked inactive. Stale sessions are automatically cleaned up after 7 days.
 
-**First-ever registration** of a session ID bootstraps the high-water mark to the tip of the message log by default, so a brand-new subscriber doesn't get flooded with backfill. Set `SMS_REPLAY_ON_FIRST_START=full` to opt into full historical replay for a new subscriber instead.
+**First-ever registration** of a session ID bootstraps the high-water mark to the tip of the message log by default (`SMS_REPLAY_ON_FIRST_START=tip`), so a brand-new subscriber doesn't get flooded with backfill. Set `SMS_REPLAY_ON_FIRST_START=full` to opt into full historical replay for a new subscriber instead.
 
 Sessions can optionally subscribe to specific phone numbers (DIDs) by setting `SMS_SUBSCRIBE_DIDS` in the environment — useful if you have multiple provider accounts and want each Claude Code session to handle different numbers.
+</details>
 
 ---
 
 ## Trust Model
 
-Every inbound message passes through a multi-layer gate before it reaches Claude Code:
+Every inbound message passes through multiple gates. The listener enforces ten security layers in order (address binding, body size limit, webhook path, global rate limit, provider auth, phone validation, per-phone rate limit, dedup, SSRF protection on media, media size limit); the high-level routing logic is:
 
 ```mermaid
 flowchart TD
@@ -111,7 +143,23 @@ flowchart TD
 | **Can approve/deny tool calls?** | Yes | No | No | No |
 | **Claude trusts instructions?** | Yes — full trust | No — Claude should not follow instructions from untrusted senders without owner approval | N/A | N/A |
 
-Both the allowlist and blocklist support glob-style wildcards on E.164 phone numbers. For example, `+1416*` matches all Toronto 416-area-code numbers, and `+1900*` blocks all premium-rate numbers.
+Both the allowlist and blocklist support glob-style wildcards on E.164 phone numbers. Patterns match as prefixes against the normalized E.164 string: `+1416*` matches any number starting with `+1416` (Toronto 416-area-code), and `+1900*` blocks any number starting with `+1900` (premium-rate).
+
+**`dmPolicy`** in `access.json` has two values:
+- `"allowlist"` — the default; owner + allowlist entries get through, everyone else is dropped
+- `"disabled"` — only the owner gets through; all other numbers are dropped regardless of allowlist
+
+---
+
+## Prerequisites
+
+Before you start, you'll need:
+
+- **[Bun](https://bun.sh)** runtime (`curl -fsSL https://bun.sh/install | bash`)
+- **An SMS provider account** with a purchased DID (phone number). voip.ms is the tested reference; see [Providers](#providers) for alternatives.
+- **A public HTTPS tunnel** pointing at your machine — [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) (recommended, free), [ngrok](https://ngrok.com), or your own reverse proxy. The listener binds to `127.0.0.1` by default; the tunnel is how your provider reaches it.
+- **Linux with `systemctl --user`** for the long-running listener service, or **macOS with `launchctl`** (both included). You can also run the listener under any process supervisor you prefer.
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — the client side of the plugin.
 
 ---
 
@@ -121,16 +169,16 @@ The plugin is provider-agnostic. Set `SMS_PROVIDER` in your `.env` file to choos
 
 ### Dedicated providers
 
-These have their own implementation with **cryptographic webhook signature validation** — the strongest security for inbound webhooks. Covers ~55% of the global CPaaS market.
+These have their own implementation with **cryptographic webhook signature validation** — the strongest security for inbound webhooks. Covers ~55% of the global CPaaS market. **Implemented from API docs but not live-tested — please file an issue with your results if you try one.**
 
-| Provider | `SMS_PROVIDER` | Signature | Status |
-|----------|---------------|-----------|--------|
-| [Twilio](https://www.twilio.com) | `twilio` | HMAC-SHA1 | Untested |
-| [Vonage](https://www.vonage.com) | `vonage` | HMAC-SHA256 | Untested |
-| [Telnyx](https://telnyx.com) | `telnyx` | ed25519 | Untested |
-| [Plivo](https://www.plivo.com) | `plivo` | HMAC-SHA256 V3 | Untested |
-| [MessageBird / Bird](https://bird.com) | `messagebird` | HMAC-SHA256 JWT | Untested |
-| [Sinch](https://www.sinch.com) | `sinch` | HMAC-SHA256 | Untested |
+| Provider | `SMS_PROVIDER` | Signature |
+|----------|---------------|-----------|
+| [Twilio](https://www.twilio.com) | `twilio` | HMAC-SHA1 |
+| [Vonage](https://www.vonage.com) | `vonage` | HMAC-SHA256 |
+| [Telnyx](https://telnyx.com) | `telnyx` | ed25519 |
+| [Plivo](https://www.plivo.com) | `plivo` | HMAC-SHA256 V3 |
+| [MessageBird / Bird](https://bird.com) | `messagebird` | HMAC-SHA256 JWT |
+| [Sinch](https://www.sinch.com) | `sinch` | HMAC-SHA256 |
 
 ### Generic provider (`SMS_PROVIDER=other`)
 
@@ -147,20 +195,7 @@ Set `SMS_PROVIDER=other` and create `~/.claude/channels/sms/other-provider.json`
 | `query_get` | Query params | Query params | voip.ms and similar legacy APIs |
 | `custom` | Manual | Manual | Anything else |
 
-### Known working configurations
-
-These providers have been tested or documented for use with the generic provider:
-
-| Provider | Type | Tested? |
-|----------|------|---------|
-| [voip.ms](https://voip.ms) | `query_get` | **Yes** |
-| [Bandwidth](https://www.bandwidth.com) | `basic_json` | No |
-| [ClickSend](https://www.clicksend.com) | `basic_json` | No |
-| [BulkSMS](https://www.bulksms.com) | `basic_json` | No |
-| [Burst SMS](https://www.transmitsms.com) | `basic_json` | No |
-| [Infobip](https://www.infobip.com) | `apikey_json` | No |
-| [Textmagic](https://www.textmagic.com) | `apikey_json` | No |
-| [Kaleyra](https://www.kaleyra.com) | `apikey_json` | No |
+**Tested:** [voip.ms](https://voip.ms) via `query_get`. Untested but documented: Bandwidth, ClickSend, BulkSMS, Burst SMS, Infobip, Textmagic, Kaleyra.
 
 The dedicated providers (Twilio, Vonage, etc.) can also be used via the generic provider if you prefer simplicity over signature validation — just use `SMS_PROVIDER=other` with the appropriate type preset.
 
@@ -170,7 +205,18 @@ Want to add a dedicated provider with signature validation? See [Contributing a 
 
 ## Quick Start
 
-### 1. Clone and install
+### 1. Install the plugin
+
+The recommended install is via the Claude Code plugin marketplace:
+
+```bash
+claude plugin install sms@mattstein111/claude-code-sms
+```
+
+This downloads the plugin into `~/.claude/plugins/cache/` and wires up the skills (`/sms:configure`, `/sms:access`) and the MCP server automatically. Enable auto-update in the plugin menu to receive fixes as they ship.
+
+<details>
+<summary><strong>Alternative: install from source</strong></summary>
 
 ```bash
 git clone https://github.com/mattstein111/claude-code-sms.git
@@ -178,35 +224,39 @@ cd claude-code-sms
 bun install
 ```
 
-### 2. Configure
+Use this if you want to hack on the plugin itself, contribute a provider, or run against a local checkout.
+</details>
 
-The fastest path is the built-in skill — run `/sms:configure` inside a Claude Code session and it will walk you through everything interactively.
+### 2. Configure (guided)
 
-To configure manually, first create the state directory:
+**Recommended:** run `/sms:configure` inside a Claude Code session. It walks you through choosing a provider, entering credentials, setting the webhook token, and laying down `.env` and `access.json` with correct permissions.
+
+<details>
+<summary><strong>Manual configuration</strong></summary>
+
+Create the state directory:
 
 ```bash
 mkdir -p ~/.claude/channels/sms && chmod 700 ~/.claude/channels/sms
 ```
 
-Then create `~/.claude/channels/sms/.env` with your provider credentials. Every setup needs these common variables:
+Create `~/.claude/channels/sms/.env` with your provider credentials. Every setup needs these common variables:
 
 ```env
-SMS_PROVIDER=twilio              # see Providers section for options
+SMS_PROVIDER=other               # see Providers section — voip.ms is the tested reference
 OWNER_PHONE=+14165551234         # your personal phone number in E.164 — gets full trust
 SMS_WEBHOOK_TOKEN=<random>       # secret for validating inbound webhooks (openssl rand -hex 24)
 SMS_WEBHOOK_PATH=/incoming       # URL path the webhook listener accepts — obscure in production
 LISTEN_PORT=5090                 # port the webhook listener binds to
 ```
 
-Then add the provider-specific variables (see [Provider Configuration](#provider-configuration) below).
+Add the provider-specific variables (see [Provider Configuration](#provider-configuration) below).
 
-Finally, set the file permissions:
+Lock down the permissions:
 
 ```bash
 chmod 600 ~/.claude/channels/sms/.env
 ```
-
-### 3. Set up access control
 
 Create `~/.claude/channels/sms/access.json` to define who can text in:
 
@@ -220,22 +270,24 @@ Create `~/.claude/channels/sms/access.json` to define who can text in:
 }
 ```
 
+- `dmPolicy` — `"allowlist"` (owner + allowFrom) or `"disabled"` (owner only)
 - `allowFrom` — phone numbers (or wildcard patterns) allowed to reach Claude Code
 - `blockList` — numbers silently blocked (stored for audit, never delivered)
 - `textChunkLimit` — outbound messages longer than this are split into multiple texts
 - `chunkMode` — `"length"` for hard splits, `"newline"` to prefer paragraph breaks
 
-The owner phone (from `.env`) always has access regardless of the allowlist.
+The owner phone always has access regardless of the allowlist.
+</details>
 
-### 4. Start the webhook listener
+### 3. Start the webhook listener
 
-The listener must be running to receive inbound SMS. You can run it directly for testing:
+The listener must be running to receive inbound SMS. For testing:
 
 ```bash
 bun run listener
 ```
 
-For production, install it as a systemd user service (Linux):
+For production, install the included systemd user service (Linux):
 
 ```bash
 cp systemd/sms-listener.service ~/.config/systemd/user/
@@ -244,23 +296,33 @@ systemctl --user daemon-reload
 systemctl --user enable --now sms-listener
 ```
 
-### 5. Expose the listener to the internet
+macOS users: see `launchd/com.claude.sms-listener.plist`.
 
-Your SMS provider needs to reach the webhook listener. Set up a tunnel (Cloudflare Tunnel, ngrok, etc.) pointing to `localhost:5090` (or whatever `LISTEN_PORT` you configured).
+### 4. Expose the listener via a tunnel
 
-### 6. Configure your provider's webhook
+Your SMS provider needs to reach the webhook listener. Cloudflare Tunnel is free and takes one command:
+
+```bash
+cloudflared tunnel --url http://localhost:5090
+```
+
+This prints a `https://<random>.trycloudflare.com` URL. For production, use a named Cloudflare Tunnel with a stable hostname. ngrok and other tunnels work the same way.
+
+### 5. Configure your provider's webhook
 
 In your SMS provider's portal, set the inbound message webhook URL to:
 
 ```
-https://your-tunnel.com/<SMS_WEBHOOK_PATH>?token=<SMS_WEBHOOK_TOKEN>
+https://your-tunnel.example.com/<SMS_WEBHOOK_PATH>?token=<SMS_WEBHOOK_TOKEN>
 ```
+
+> **Security note:** Putting the token in the URL query string means it may appear in provider-side request logs. Use a long random token (`openssl rand -hex 24`), treat it as a secret, and rotate it if your tunnel hostname leaks. Some providers support a header-based token — check the provider notes below.
 
 The exact location of this setting varies by provider — see the provider-specific notes in [Provider Configuration](#provider-configuration).
 
-### 7. Use it
+### 6. Use it
 
-The plugin auto-registers via `.claude-plugin/plugin.json` when Claude Code runs in this project directory. Start Claude Code, and send a text to your number — Claude will see it as a channel notification.
+Start Claude Code and send a text to your number. Claude will see it as a channel notification (see [What it looks like](#what-it-looks-like) above).
 
 ---
 
@@ -432,6 +494,8 @@ Send an SMS or MMS message to a phone number. The recipient must be on the allow
 | `text` | string | yes | Message body |
 | `media_urls` | string[] | no | Publicly accessible URLs for MMS attachments (max varies by provider, typically 3, max 1300KB each) |
 
+**Returns:** Confirmation text with the provider's message ID. Errors come back with `isError: true` and an explanatory message (e.g., blocked recipient, send failure).
+
 ### `fetch_messages`
 
 Retrieve conversation history with a specific phone number. Returns messages in chronological order (oldest first). Includes both inbound and outbound messages so Claude can reconstruct the full thread.
@@ -439,15 +503,36 @@ Retrieve conversation history with a specific phone number. Returns messages in 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `phone` | string | yes | Phone number in E.164 format |
-| `limit` | number | no | Maximum messages to return (default 30) |
+| `limit` | number | no | Maximum messages to return (default 30, capped at 200) |
+
+**Returns:** A JSON array of message objects:
+
+```json
+[
+  {
+    "id": 42,
+    "timestamp": "2026-04-16T23:44:49Z",
+    "direction": "in",
+    "phone": "+14165551234",
+    "did": "+16475551234",
+    "message": "Test message",
+    "media": "/path/to/file1.jpg,/path/to/file2.png"
+  }
+]
+```
+
+`did` and `media` are omitted when empty.
 
 ### `download_attachment`
 
-Get local file paths for MMS media that was downloaded when the message arrived. Returns the file path and filename for each attachment.
+Get local file paths for MMS media that was downloaded when the message arrived.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `message_id` | string | yes | Message ID from the database |
+| `chat_id` | string | yes | Phone number (E.164) the message belongs to — access scoping |
+
+**Returns:** A JSON array of `{ path, name }` objects — one per attachment. The file paths point inside `~/.claude/channels/sms/media/`; Claude can read them directly. Returns an error if the message doesn't exist or doesn't belong to `chat_id`.
 
 ---
 
@@ -464,16 +549,16 @@ sequenceDiagram
 
     C->>M: Permission request<br/>"Bash: npm install"
     M->>P: sendSMS to owner
-    P->>O: [Permission] Claude wants to:<br/>Run npm install.<br/>Reply "yes abcde" or "no abcde"
-    O->>P: "yes abcde"
+    P->>O: [Permission] Claude wants to:<br/>Run npm install.<br/>Tool: Bash<br/>Reply "yes 7q3fp" or "no 7q3fp"
+    O->>P: "yes 7q3fp"
     P-->>M: webhook → listener → DB
     M->>C: permission: allow
     Note over C: Proceeds with<br/>npm install
 ```
 
-The MCP server intercepts inbound messages from the owner that match the pattern `yes <code>` or `no <code>` (where the code is the 5-character ID from the permission request). These are consumed by the permission system and not delivered as regular messages.
+The MCP server intercepts inbound messages from the owner that match `y|yes|n|no <code>` where `<code>` is the 5-character ID from the permission request. The match is **case-insensitive** and tolerates leading/trailing whitespace, so `YES 7q3fp`, `y 7q3fp`, and `  no 7q3fp  ` all work. Matched messages are consumed by the permission system and not delivered as regular messages.
 
-Only the owner phone number can approve or deny permissions. If anyone else sends `yes abcde`, it's treated as a normal message.
+Only the owner phone number can approve or deny permissions. If anyone else sends `yes 7q3fp`, it's treated as a normal message. Each request ID can only be used once (replay-protected for 1 hour).
 
 ---
 
@@ -566,11 +651,43 @@ All runtime state lives under `~/.claude/channels/sms/`:
     └── listener.log         # Webhook listener log (JSON lines, one entry per line)
 ```
 
+The plugin enforces restrictive permissions on creation — the directory gets `chmod 700` and `.env` gets `chmod 600`. Don't loosen these; the tooling treats `.env` as a secret.
+
+---
+
+## Troubleshooting
+
+**Messages aren't arriving in Claude Code.**
+- Check the listener is running: `systemctl --user status sms-listener` (Linux) or `launchctl list | grep sms` (macOS).
+- Tail the listener log: `tail -f ~/.claude/channels/sms/logs/listener.log`. Every inbound webhook shows up here, along with the gate decision.
+- Confirm your tunnel is up — `curl https://your-tunnel.example.com/<path>?token=<wrong>` should return `401`. If it returns connection errors, the tunnel isn't reaching `localhost:5090`.
+
+**Provider reports `401 Unauthorized` on webhook delivery.**
+- Token mismatch. Compare `SMS_WEBHOOK_TOKEN` in `.env` against the `?token=` value in your provider's webhook URL.
+- Some providers URL-encode the query string differently — check the listener log for what token value it's actually seeing.
+
+**Message arrives but Claude never sees it.**
+- The sender is probably not on the allowlist. Check the log for `drop: not_on_allowlist`. Add them via `/sms:access allow +1XXXXXXXXXX` or edit `access.json`.
+- If `dmPolicy` is `"disabled"`, only the owner phone gets through — everyone else is dropped.
+
+**Claude sees messages but can't send.**
+- The recipient must be on the allowlist or be the owner. Non-allowlisted outbound targets are refused by the `send` tool.
+- Check provider credentials in `.env`. Run `bun run server.ts` directly to surface startup errors on stderr.
+
+**Permission relay doesn't work.**
+- Owner phone must match exactly (E.164, same as `OWNER_PHONE` in `.env`).
+- The reply has to look like `y <code>`, `yes <code>`, `n <code>`, or `no <code>` — other wording is treated as a normal message.
+- Each request ID is single-use and expires after an hour.
+
+**MCP server crashed on startup.**
+- Usually a missing env var or malformed provider config. Check the Claude Code startup output for the MCP server's stderr.
+- `/sms:configure` validates most common misconfigurations — re-running it is often faster than debugging by hand.
+
 ---
 
 ## Contributing a Provider
 
-The provider interface (`providers/interface.ts`) is intentionally small — typically 50-100 lines per implementation:
+The provider interface (`providers/interface.ts`) is intentionally small — typically 50-100 lines per implementation. See [`providers/twilio.ts`](providers/twilio.ts) for a reference implementation of a signature-validating provider, or [`providers/other.ts`](providers/other.ts) for the config-driven generic provider.
 
 ```typescript
 interface SmsProvider {
@@ -593,13 +710,13 @@ To add a new provider:
 
 Phone numbers arrive as E.164 (`+14165551234`). Your provider module converts to whatever format the API expects (e.g., Plivo strips the `+`, Twilio uses E.164 as-is).
 
-> **Note:** Before writing a dedicated provider, check whether the generic provider (`SMS_PROVIDER=other`) can handle your use case. Dedicated providers are only needed when the provider has a bespoke webhook signature scheme that can't be expressed as simple token validation.
+> **Before writing a dedicated provider**, check whether the generic provider (`SMS_PROVIDER=other`) can handle your use case. Dedicated providers are only needed when the provider has a bespoke webhook signature scheme that can't be expressed as simple token validation.
 
 ---
 
 ## Known Limitations
 
-- **Claude Code channels are a research preview** (launched March 2026). There are known upstream bugs where notifications can be silently dropped when the session is idle, or duplicate plugin instances can be spawned. These are Claude Code issues, not plugin bugs.
+- **Claude Code channels are a research preview.** There are known upstream bugs where notifications can be silently dropped when the session is idle, or duplicate plugin instances can be spawned. These are Claude Code issues, not plugin bugs.
 - **Webhook reliability** — if the listener process is down when a provider fires a webhook, that message is lost. Most providers do not retry. The systemd service with auto-restart mitigates this.
 - **Outbound MMS** requires that media URLs are publicly accessible on the internet — the SMS provider fetches the media from the URL you provide. This plugin does not host or proxy files.
 - **Long messages** are chunked at 160 characters by default (the standard SMS segment size). This is configurable via `textChunkLimit` in `access.json`.
@@ -609,4 +726,4 @@ Phone numbers arrive as E.164 (`+14165551234`). Your provider module converts to
 
 ## License
 
-Private. Not yet licensed for distribution.
+Personal project, offered as-is without a formal license. Feel free to read, experiment, and self-host. If you need an explicit license for your use case (redistribution, commercial use, etc.), open an issue and we can sort it out.
