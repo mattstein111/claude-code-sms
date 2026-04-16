@@ -25,6 +25,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { createHash } from "crypto";
 import { normalizePhone } from "./phone";
 import {
   getDb,
@@ -37,10 +38,12 @@ import {
   insertOutbound,
   fetchMessages,
   getMessage,
+  getMaxMessageId,
+  updateSessionPoll,
 } from "./db";
 import { getProvider } from "./providers/index";
 import { gate, getOwnerPhone, readAccess } from "./access";
-import { loadEnv } from "./env";
+import { loadEnv, STATE_DIR } from "./env";
 
 // --- Load .env from state directory ---
 
@@ -50,15 +53,48 @@ await loadEnv();
 
 const provider = getProvider();
 
-// --- Session identity ---
-
-const SESSION_ID = `pid-${process.pid}-${Date.now()}`;
-
 // DID subscription: if SMS_SUBSCRIBE_DIDS is set, only deliver messages to those DIDs.
 // Comma-separated E.164 numbers. Null = deliver all.
 const SUBSCRIBE_DIDS: string[] | null = process.env.SMS_SUBSCRIBE_DIDS
   ? process.env.SMS_SUBSCRIBE_DIDS.split(",").map((d) => d.trim())
   : null;
+
+// --- Session identity ---
+//
+// Stable across restarts, so a restart of the same logical consumer
+// does not re-deliver the entire inbound history. Precedence:
+//   1. SMS_SESSION_ID — explicit operator override
+//   2. CLAUDE_SESSION_ID — stable hash, if Claude Code injects it
+//   3. Auto-derive from state dir + subscribed DIDs (deterministic)
+
+function deriveSessionId(dids: string[] | null): string {
+  if (process.env.SMS_SESSION_ID) return process.env.SMS_SESSION_ID;
+
+  if (process.env.CLAUDE_SESSION_ID) {
+    const h = createHash("sha1")
+      .update(process.env.CLAUDE_SESSION_ID)
+      .digest("hex")
+      .slice(0, 16);
+    return `claude-${h}`;
+  }
+
+  const didsKey = dids && dids.length > 0 ? [...dids].sort().join(",") : "*";
+  const h = createHash("sha1")
+    .update(`${STATE_DIR}|${didsKey}`)
+    .digest("hex")
+    .slice(0, 16);
+  return `auto-${h}`;
+}
+
+const SESSION_ID = deriveSessionId(SUBSCRIBE_DIDS);
+
+// Controls behaviour on first-ever registration of a session id:
+//   "tip"  (default) — start at the current end of the log, only deliver
+//                      messages received after this session subscribed.
+//   "full"           — deliver full history; useful for one-shot backfills.
+const REPLAY_ON_FIRST_START = (
+  process.env.SMS_REPLAY_ON_FIRST_START || "tip"
+).toLowerCase();
 
 // --- Logging (stderr only — stdout is MCP protocol) ---
 
@@ -380,9 +416,27 @@ const PERMISSION_ID_TTL_MS = 60 * 60 * 1000; // 1 hour
 function startPolling(): void {
   getDb();
 
-  // Register this session
-  registerSession(SESSION_ID, SUBSCRIBE_DIDS);
-  log(`Session registered: ${SESSION_ID}, DIDs: ${SUBSCRIBE_DIDS?.join(",") || "all"}`);
+  // Register this session. isNew=true means we've never seen this id before —
+  // decide once whether to bootstrap to the tip (default) or replay history.
+  const { isNew } = registerSession(SESSION_ID, SUBSCRIBE_DIDS);
+  if (isNew) {
+    if (REPLAY_ON_FIRST_START === "full") {
+      log(
+        `New session ${SESSION_ID} — SMS_REPLAY_ON_FIRST_START=full, will replay entire history`
+      );
+    } else {
+      const tip = getMaxMessageId();
+      updateSessionPoll(SESSION_ID, tip);
+      log(
+        `New session ${SESSION_ID} — bootstrapped hwm to tip (${tip}); only new messages will be delivered`
+      );
+    }
+  } else {
+    log(`Resuming session ${SESSION_ID}`);
+  }
+  log(
+    `Session active: ${SESSION_ID}, DIDs: ${SUBSCRIBE_DIDS?.join(",") || "all"}`
+  );
 
   pollInterval = setInterval(() => {
     try {
