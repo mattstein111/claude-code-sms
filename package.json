@@ -4,6 +4,7 @@
   "description": "Claude Code channel plugin for two-way SMS/MMS with pluggable provider support",
   "type": "module",
   "scripts": {
+    "start": "bun install --no-summary && bun server.ts",
     "server": "bun run server.ts",
     "listener": "bun run listener.ts"
   },
