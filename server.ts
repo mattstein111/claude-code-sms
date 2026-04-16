@@ -24,6 +24,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import { normalizePhone } from "./phone";
 import {
   getDb,
@@ -470,14 +471,17 @@ function startPolling(): void {
 // --- Permission request handler ---
 
 server.setNotificationHandler(
-  { method: "notifications/claude/channel/permission_request" },
+  z.object({
+    method: z.literal("notifications/claude/channel/permission_request"),
+    params: z.object({
+      request_id: z.string(),
+      tool_name: z.string(),
+      description: z.string(),
+      input_preview: z.string(),
+    }),
+  }),
   async (notification) => {
-    const params = notification.params as {
-      request_id: string;
-      tool_name: string;
-      description: string;
-      input_preview: string;
-    };
+    const params = notification.params;
 
     const ownerPhone = getOwnerPhone();
     if (!ownerPhone) {
