@@ -176,15 +176,45 @@ export function markBlocked(id: number): void {
 
 // --- Session management (MCP server) ---
 
-/** Register a new session. Returns the session ID. */
-export function registerSession(sessionId: string, dids: string[] | null): void {
+/**
+ * Register a session. Upserts without clobbering the high-water mark
+ * if the session already exists (a restart of the same logical consumer).
+ * Returns `{ isNew: true }` only on first-ever registration for this id —
+ * callers use that to decide whether to bootstrap hwm to tip.
+ */
+export function registerSession(
+  sessionId: string,
+  dids: string[] | null
+): { isNew: boolean } {
   const db = getDb();
   const didsStr = dids ? dids.join(",") : null;
 
+  const existing = db
+    .prepare("SELECT session_id FROM sessions WHERE session_id = ?")
+    .get(sessionId);
+
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO sessions (session_id, started_at, last_poll, dids, active, hwm)
+       VALUES (?, datetime('now'), datetime('now'), ?, 1, 0)`
+    ).run(sessionId, didsStr);
+    return { isNew: true };
+  }
+
   db.prepare(
-    `INSERT OR REPLACE INTO sessions (session_id, started_at, last_poll, dids, active, hwm)
-     VALUES (?, datetime('now'), datetime('now'), ?, 1, 0)`
-  ).run(sessionId, didsStr);
+    `UPDATE sessions SET last_poll = datetime('now'), dids = ?, active = 1
+     WHERE session_id = ?`
+  ).run(didsStr, sessionId);
+  return { isNew: false };
+}
+
+/** Current max message id — for bootstrapping new sessions to the tip. */
+export function getMaxMessageId(): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT COALESCE(MAX(id), 0) AS max_id FROM messages")
+    .get() as { max_id: number };
+  return row.max_id;
 }
 
 /** Update the session's last poll time and high-water mark. */

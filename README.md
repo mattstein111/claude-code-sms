@@ -51,7 +51,15 @@ The plugin has two components that share a single SQLite database:
 
 Multiple Claude Code sessions can run on the same machine, each with its own MCP server instance. The database tracks delivery per-session — so if two sessions are running, both will see the same inbound SMS independently.
 
-Each MCP server registers a session on startup with a unique ID. A `deliveries` table records which messages each session has already seen, using a high-water mark for efficient polling. When a session shuts down, it's marked inactive. Stale sessions are automatically cleaned up after 7 days.
+Each MCP server registers a session on startup with a **stable ID**, derived in this order of precedence:
+
+1. `SMS_SESSION_ID` — explicit operator override
+2. `CLAUDE_SESSION_ID` — if Claude Code injects one, its SHA-1 prefix is used
+3. Auto-derived from the state directory + subscribed DIDs (deterministic hash)
+
+Stable IDs mean a restart of the same logical consumer resumes where it left off instead of re-reading the full history. A `deliveries` table records which messages each session has already seen, using a high-water mark for efficient polling. When a session shuts down, it's marked inactive. Stale sessions are automatically cleaned up after 7 days.
+
+**First-ever registration** of a session ID bootstraps the high-water mark to the tip of the message log by default, so a brand-new subscriber doesn't get flooded with backfill. Set `SMS_REPLAY_ON_FIRST_START=full` to opt into full historical replay for a new subscriber instead.
 
 Sessions can optionally subscribe to specific phone numbers (DIDs) by setting `SMS_SUBSCRIBE_DIDS` in the environment — useful if you have multiple provider accounts and want each Claude Code session to handle different numbers.
 
