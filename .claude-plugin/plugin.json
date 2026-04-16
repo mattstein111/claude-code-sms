@@ -1,11 +1,7 @@
 {
   "name": "sms",
-  "version": "0.2.0-beta",
+  "version": "0.2.1-beta",
   "description": "Two-way SMS/MMS channel with pluggable provider support",
   "channel": true,
-  "mcp": {
-    "command": "bun",
-    "args": ["run", "server.ts"],
-    "cwd": "."
-  }
+  "mcpServers": "./.mcp.json"
 }

@@ -1,6 +1,6 @@
 {
   "name": "claudecode-sms",
-  "version": "0.2.0-beta",
+  "version": "0.2.1-beta",
   "description": "Claude Code channel plugin for two-way SMS/MMS with pluggable provider support",
   "type": "module",
   "scripts": {
