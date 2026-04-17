@@ -71,7 +71,7 @@ Interface: `providers/interface.ts`. Registry: `providers/index.ts`.
 
 All state lives under `~/.claude/channels/sms/`:
 - `.env` — SMS_PROVIDER + provider-specific credentials, webhook token, owner phone
-- `access.json` — allowlist/blocklist with wildcard support
+- `access.json` — DM policy + blocklist with wildcard support (optional — defaults apply if absent)
 - `other-provider.json` — config for generic provider (when `SMS_PROVIDER=other`)
 - `sms.db` — message database (shared by all sessions)
 - `media/` — downloaded MMS attachments
@@ -82,9 +82,11 @@ All state lives under `~/.claude/channels/sms/`:
 - Each provider converts to its own format internally (e.g. some providers strip `+`)
 - All stdout is reserved for MCP protocol — debug logging goes to stderr
 - Owner phone (in `.env`) has full trust including permission relay
-- All other numbers are untrusted — messages delivered with E.164 phone only
+- All other inbound numbers are untrusted — messages delivered with E.164 phone only
 - Blocklisted numbers are stored in DB (`blocked = 1`) but never delivered to Claude Code
-- Allowlist/blocklist support glob wildcards (e.g. `+1416*`)
+- There is no inbound allowlist — any non-blocked number reaches the session; the model decides how to handle it
+- Outbound sends are always allowed (no gating)
+- Blocklist supports glob wildcards (e.g. `+1416*`)
 - `did` column tracks which local number sent/received (enables multi-number support)
 
 ## Rate limiting & retention

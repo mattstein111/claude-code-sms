@@ -1,6 +1,6 @@
 ---
 name: sms:access
-description: Manage the SMS channel phone allowlist, blocklist, and pairing approvals
+description: Manage the SMS channel blocklist and DM policy
 user_invocable: true
 ---
 
@@ -8,39 +8,27 @@ user_invocable: true
 
 Manage phone number access for the SMS channel plugin.
 
+There is no inbound allowlist — any non-blocked number reaches the session, and the model decides what to do (respond, ignore, escalate). Outbound sends are always allowed.
+
 ## Subcommands
 
 Parse the user's arguments to determine the subcommand:
 
 ### `/sms:access list`
-Show current access policy, allowlist, and blocklist from `~/.claude/channels/sms/access.json`.
-
-### `/sms:access allow <phone>`
-Add a phone number (or wildcard pattern like `+1416*`) to the allowlist.
-- Normalize the number to E.164 before saving
-- Check it's not already in the list
-- Remove from blocklist if present
+Show current DM policy and blocklist from `~/.claude/channels/sms/access.json`.
 
 ### `/sms:access block <phone>`
-Add a phone number (or wildcard pattern) to the blocklist.
+Add a phone number (or wildcard pattern like `+1416*`) to the blocklist.
 - Normalize the number to E.164 before saving
-- Remove from allowlist if present
 - Messages from this number will be stored in the DB for audit but never delivered to Claude Code
 
 ### `/sms:access remove <phone>`
-Remove a phone number from both allowlist and blocklist.
+Remove a phone number from the blocklist.
 
-### `/sms:access policy <allowlist|disabled>`
+### `/sms:access policy <enabled|disabled>`
 Set the DM policy:
-- `allowlist` — only allowlisted numbers (and the owner) can reach Claude Code
+- `enabled` — any non-blocked number can reach Claude Code (default)
 - `disabled` — no inbound messages delivered at all
-
-### `/sms:access pair <code>`
-Approve a pending pairing request. When an unknown number texts in:
-1. The MCP server generates a 6-char hex code and replies via SMS
-2. The user runs `/sms:access pair <code>` in their terminal
-3. This writes an approval file to `~/.claude/channels/sms/approved/<phone>`
-4. The MCP server detects the approval, confirms via SMS, and adds to allowlist
 
 ## File location
 

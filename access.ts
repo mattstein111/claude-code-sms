@@ -1,10 +1,13 @@
 /**
- * Access control — allowlist, blocklist, and owner verification.
+ * Access control — blocklist and owner verification.
  *
  * access.json is re-read on every check so changes take effect immediately.
  * Supports glob-style wildcards on E.164 phone numbers (e.g. "+1416*").
  *
- * Gate order: blocklist (drop) → owner (full trust) → allowlist (untrusted) → drop.
+ * Gate order (inbound): dm policy disabled → blocklist → owner (full trust) → untrusted (allow).
+ *
+ * There is no inbound allowlist — any non-blocked number reaches the session and the
+ * model decides what to do (respond, ignore, escalate). Outbound sends are always allowed.
  */
 
 import { readFileSync, writeFileSync, renameSync } from "fs";
@@ -16,8 +19,7 @@ const STATE_DIR =
 const ACCESS_PATH = join(STATE_DIR, "access.json");
 
 export interface AccessConfig {
-  dmPolicy: "allowlist" | "disabled";
-  allowFrom: string[];
+  dmPolicy: "enabled" | "disabled";
   blockList: string[];
   textChunkLimit: number;
   chunkMode: "length" | "newline";
@@ -29,8 +31,7 @@ export type GateResult =
   | { action: "drop"; reason: string };
 
 const DEFAULT_CONFIG: AccessConfig = {
-  dmPolicy: "allowlist",
-  allowFrom: [],
+  dmPolicy: "enabled",
   blockList: [],
   textChunkLimit: 160,
   chunkMode: "length",
@@ -40,7 +41,15 @@ const DEFAULT_CONFIG: AccessConfig = {
 export function readAccess(): AccessConfig {
   try {
     const raw = readFileSync(ACCESS_PATH, "utf-8");
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw);
+    // Legacy "allowlist" policy is treated as "enabled" (allowlist was removed).
+    const dmPolicy = parsed.dmPolicy === "disabled" ? "disabled" : "enabled";
+    const { allowFrom: _legacyAllowFrom, ...rest } = parsed;
+    return {
+      ...DEFAULT_CONFIG,
+      ...rest,
+      dmPolicy,
+    };
   } catch {
     return { ...DEFAULT_CONFIG };
   }
@@ -57,16 +66,14 @@ export function writeAccess(config: AccessConfig): void {
 
 /**
  * Match a phone number against a pattern with optional trailing wildcard.
- * Supports exact match ("+ 14165551234") and prefix match ("+1416*").
+ * Supports exact match ("+14165551234") and prefix match ("+1416*").
  * No regex — immune to ReDoS.
  */
 function matchPattern(phone: string, pattern: string): boolean {
   if (!pattern.includes("*")) {
-    return phone === pattern; // exact match
+    return phone === pattern;
   }
 
-  // Only trailing wildcard is supported: "+1416*" matches "+14165551234"
-  // Multiple wildcards or mid-string wildcards are treated as trailing at first *
   const prefix = pattern.slice(0, pattern.indexOf("*"));
   return phone.startsWith(prefix);
 }
@@ -89,7 +96,8 @@ export function getOwnerPhone(): string | null {
 
 /**
  * Gate check for inbound messages.
- * Returns the action to take and trust level.
+ * Drops on disabled policy or blocklist; allows everything else.
+ * Owner numbers are flagged with full trust; all others are untrusted.
  */
 export function gate(phone: string): GateResult {
   const config = readAccess();
@@ -98,21 +106,14 @@ export function gate(phone: string): GateResult {
     return { action: "drop", reason: "dm_policy_disabled" };
   }
 
-  // Blocklist always checked first
   if (matchesAny(phone, config.blockList)) {
     return { action: "drop", reason: "blocklisted" };
   }
 
-  // Owner gets full trust
   const owner = getOwnerPhone();
   if (owner && phone === owner) {
     return { action: "allow", trust: "owner" };
   }
 
-  // Allowlist check
-  if (matchesAny(phone, config.allowFrom)) {
-    return { action: "allow", trust: "untrusted" };
-  }
-
-  return { action: "drop", reason: "not_on_allowlist" };
+  return { action: "allow", trust: "untrusted" };
 }

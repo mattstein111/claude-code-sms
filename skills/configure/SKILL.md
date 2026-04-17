@@ -95,4 +95,4 @@ After writing the `.env`, remind the user to:
 1. Set up the webhook URL in their provider's portal (provider-specific instructions above)
 2. Configure a Cloudflare tunnel (or similar) pointing to the LISTEN_PORT
 3. Install and start the systemd service for the webhook listener
-4. Add their own phone number to the allowlist if it's different from OWNER_PHONE: `/sms:access allow +1XXXXXXXXXX`
+4. (Optional) Block unwanted numbers with `/sms:access block +1XXXXXXXXXX`

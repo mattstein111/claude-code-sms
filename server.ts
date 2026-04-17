@@ -11,8 +11,8 @@
  * on the same machine all see the same inbound messages.
  *
  * Owner phone (from .env) gets full trust including permission relay.
- * All other numbers are untrusted — messages delivered but flagged.
- * Blocklisted numbers are never delivered.
+ * All other inbound numbers are untrusted — messages delivered but flagged.
+ * Blocklisted numbers are never delivered. Outbound sends are always allowed.
  *
  * Usage: spawned by Claude Code via .claude-plugin/plugin.json
  * Config: ~/.claude/channels/sms/.env + access.json
@@ -250,21 +250,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const text = args?.text as string;
       const mediaUrls = (args?.media_urls as string[] | undefined) || [];
 
-      // Gate check — only send to allowed numbers
-      const gateResult = gate(chatId);
-      if (gateResult.action === "drop") {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Cannot send to ${chatId}: ${gateResult.reason}`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      // No outbound gating — sends are always allowed. Inbound gating (blocklist,
+      // disabled policy) still applies in the poll loop below.
 
-      // Chunk the message if needed
       const accessConfig = readAccess();
       const chunks = chunk(text, accessConfig.textChunkLimit, accessConfig.chunkMode);
 

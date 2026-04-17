@@ -8,7 +8,7 @@
 
 **Give Claude Code a phone number.** People text it, Claude reads it. Claude replies, they get a text.
 
-A [Claude Code channel plugin](https://docs.anthropic.com/en/docs/claude-code) that bridges SMS/MMS into your coding session. The owner gets full trust and can approve tool calls from their phone. Other people can text in too — their messages are delivered to Claude but treated as untrusted. Blocked numbers are silently dropped.
+A [Claude Code channel plugin](https://docs.anthropic.com/en/docs/claude-code) that bridges SMS/MMS into your coding session. The owner gets full trust and can approve tool calls from their phone. Anyone else can text in too — their messages are delivered to Claude but treated as untrusted, and Claude decides what to do with them. Blocked numbers are silently dropped.
 
 ---
 
@@ -76,13 +76,11 @@ flowchart TD
     RateCheck{"Within rate\nlimit?"}
     BlockCheck{"On blocklist?"}
     OwnerCheck{"Owner phone?"}
-    AllowCheck{"On allowlist?"}
     Reject["Reject at HTTP level\n<i>401 unauthorized</i>"]
     RateDrop["Drop silently\n<i>200 response, not stored</i>"]
     Block["Store in DB for audit\n<i>never delivered</i>"]
     Owner["Deliver to Claude Code\n<b>owner: true</b>"]
     Untrusted["Deliver to Claude Code\n<i>phone number only</i>"]
-    Unknown["Drop silently\n<i>stored but not delivered</i>"]
 
     Inbound --> TokenCheck
     TokenCheck -- "No" --> Reject
@@ -92,26 +90,25 @@ flowchart TD
     BlockCheck -- "Yes" --> Block
     BlockCheck -- "No" --> OwnerCheck
     OwnerCheck -- "Yes" --> Owner
-    OwnerCheck -- "No" --> AllowCheck
-    AllowCheck -- "Yes" --> Untrusted
-    AllowCheck -- "No" --> Unknown
+    OwnerCheck -- "No" --> Untrusted
 
     style Reject fill:#EF4444,color:#fff,stroke:none
     style RateDrop fill:#EF4444,color:#fff,stroke:none
     style Block fill:#EF4444,color:#fff,stroke:none
-    style Unknown fill:#6B7280,color:#fff,stroke:none
     style Owner fill:#10B981,color:#fff,stroke:none
     style Untrusted fill:#F59E0B,color:#fff,stroke:none
 ```
 
-| | Owner | Allowlisted | Blocked | Unknown |
-|---|---|---|---|---|
-| **Configured in** | `OWNER_PHONE` in `.env` | `allowFrom` in `access.json` | `blockList` in `access.json` | Not listed anywhere |
-| **Messages delivered?** | Yes, with `owner: "true"` in meta | Yes, with E.164 phone number only | No — stored in DB for audit, never delivered | No |
-| **Can approve/deny tool calls?** | Yes | No | No | No |
-| **Claude trusts instructions?** | Yes — full trust | No — Claude should not follow instructions from untrusted senders without owner approval | N/A | N/A |
+| | Owner | Everyone else | Blocked |
+|---|---|---|---|
+| **Configured in** | `OWNER_PHONE` in `.env` | (no list — default) | `blockList` in `access.json` |
+| **Messages delivered?** | Yes, with `owner: "true"` in meta | Yes, with E.164 phone number only | No — stored in DB for audit, never delivered |
+| **Can approve/deny tool calls?** | Yes | No | No |
+| **Claude trusts instructions?** | Yes — full trust | No — Claude should treat the sender as untrusted and decide whether to respond, ignore, or escalate to the owner | N/A |
 
-Both the allowlist and blocklist support glob-style wildcards on E.164 phone numbers. For example, `+1416*` matches all Toronto 416-area-code numbers, and `+1900*` blocks all premium-rate numbers.
+There is no inbound allowlist — any non-blocked number reaches Claude, and the model decides how to handle it. If you want to keep specific numbers out, add them to the blocklist. The blocklist supports glob-style wildcards on E.164 phone numbers (e.g. `+1900*` blocks all premium-rate numbers).
+
+Outbound sends are always allowed — the model can text any number.
 
 ---
 
@@ -208,24 +205,23 @@ chmod 600 ~/.claude/channels/sms/.env
 
 ### 3. Set up access control
 
-Create `~/.claude/channels/sms/access.json` to define who can text in:
+An `access.json` file is optional — the defaults (DM policy enabled, empty blocklist) work out of the box. Create `~/.claude/channels/sms/access.json` only if you want to customize:
 
 ```json
 {
-  "dmPolicy": "allowlist",
-  "allowFrom": ["+14165559999", "+1647*"],
+  "dmPolicy": "enabled",
   "blockList": ["+1900*"],
   "textChunkLimit": 160,
   "chunkMode": "length"
 }
 ```
 
-- `allowFrom` — phone numbers (or wildcard patterns) allowed to reach Claude Code
+- `dmPolicy` — `"enabled"` (default) delivers all non-blocked inbound to Claude; `"disabled"` drops everything
 - `blockList` — numbers silently blocked (stored for audit, never delivered)
 - `textChunkLimit` — outbound messages longer than this are split into multiple texts
 - `chunkMode` — `"length"` for hard splits, `"newline"` to prefer paragraph breaks
 
-The owner phone (from `.env`) always has access regardless of the allowlist.
+The owner phone (from `.env`) always reaches Claude with full trust unless it's on the blocklist.
 
 ### 4. Start the webhook listener
 
@@ -424,7 +420,7 @@ Claude Code gets three tools from this plugin:
 
 ### `send`
 
-Send an SMS or MMS message to a phone number. The recipient must be on the allowlist or be the owner. Messages longer than `textChunkLimit` (default 160) are automatically split into multiple texts.
+Send an SMS or MMS message to a phone number. Outbound sends are always allowed. Messages longer than `textChunkLimit` (default 160) are automatically split into multiple texts.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -481,19 +477,17 @@ Only the owner phone number can approve or deny permissions. If anyone else send
 
 | Skill | Description |
 |-------|-------------|
-| `/sms:configure` | Interactive setup — walks you through choosing a provider, entering credentials, setting the webhook token, and configuring access control |
-| `/sms:access` | Manage the phone allowlist, blocklist, and pairing approvals |
+| `/sms:configure` | Interactive setup — walks you through choosing a provider, entering credentials, and setting the webhook token |
+| `/sms:access` | Manage the blocklist and DM policy |
 
 `/sms:access` subcommands:
 
 | Subcommand | Description |
 |------------|-------------|
-| `list` | Show current policy, allowlist, and blocklist |
-| `allow <phone>` | Add a number or pattern to the allowlist |
+| `list` | Show current DM policy and blocklist |
 | `block <phone>` | Add a number or pattern to the blocklist |
-| `remove <phone>` | Remove a number from both lists |
-| `policy <allowlist\|disabled>` | Set the DM policy |
-| `pair <code>` | Approve a pending pairing request |
+| `remove <phone>` | Remove a number from the blocklist |
+| `policy <enabled\|disabled>` | Set the DM policy |
 
 ---
 
@@ -557,11 +551,10 @@ All runtime state lives under `~/.claude/channels/sms/`:
 ```
 ~/.claude/channels/sms/
 ├── .env                     # Provider credentials and config (chmod 600)
-├── access.json              # Allowlist, blocklist, and chunking settings
+├── access.json              # DM policy, blocklist, and chunking settings (optional)
 ├── other-provider.json      # Generic provider config (when SMS_PROVIDER=other)
 ├── sms.db                   # SQLite database (messages, sessions, deliveries)
 ├── media/                   # Downloaded MMS attachments
-├── approved/                # Pairing approval marker files
 └── logs/
     └── listener.log         # Webhook listener log (JSON lines, one entry per line)
 ```
