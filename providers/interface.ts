@@ -32,6 +32,35 @@ export interface SendResult {
   id: string;
 }
 
+/**
+ * How this provider handles messages longer than a single SMS segment.
+ *
+ *   passthrough  — Provider's sendSMS handles long messages natively
+ *                  (segments with proper UDH concatenation so the recipient
+ *                  device reassembles one message). Send the full body as-is.
+ *                  Used by: Twilio, Telnyx, Plivo, Sinch, MessageBird, Vonage.
+ *
+ *   mms_fallback — Provider's sendSMS has a hard character cap and does NOT
+ *                  concatenate; long messages must be routed through the
+ *                  provider's MMS API instead (delivered as a single MMS).
+ *                  Used by: voip.ms.
+ *
+ *   chunk        — Last resort. Split the text at `threshold` chars and send
+ *                  each slice as an independent SMS. Recipients will see
+ *                  fragmented, unordered messages. Only use if the provider
+ *                  supports neither long SMS nor text-only MMS.
+ */
+export type LongMessageStrategy = "passthrough" | "mms_fallback" | "chunk";
+
+export interface LongMessageConfig {
+  strategy: LongMessageStrategy;
+  /**
+   * Max chars for a single SMS segment before the strategy triggers.
+   * Only consulted for `mms_fallback` and `chunk`. Default: 160.
+   */
+  threshold?: number;
+}
+
 export interface SmsProvider {
   /** Provider name (e.g. "twilio", "sinch"). */
   readonly name: string;
@@ -50,10 +79,19 @@ export interface SmsProvider {
 
   /**
    * Send an MMS with media attachments.
-   * Media URLs must be publicly accessible.
+   * Media URLs must be publicly accessible. An empty array is allowed when
+   * the provider supports text-only MMS as a long-message fallback (see
+   * `longMessage.strategy === "mms_fallback"`).
    * Phone numbers are E.164 format.
    */
   sendMMS(to: string, message: string, mediaUrls: string[]): Promise<SendResult>;
+
+  /**
+   * How this provider should handle messages that exceed a single SMS segment.
+   * See `LongMessageStrategy` for options. Consulted by the send path to decide
+   * between a single sendSMS call, an MMS fallback, or DIY chunking.
+   */
+  readonly longMessage: LongMessageConfig;
 
   /**
    * Parse and validate an inbound webhook request.

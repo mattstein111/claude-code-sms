@@ -63,6 +63,7 @@ function validateSignature(
 export const twilioProvider: SmsProvider = {
   name: "twilio",
   webhookMethod: "POST",
+  longMessage: { strategy: "passthrough" },
 
   validateConfig() {
     const required = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER"];

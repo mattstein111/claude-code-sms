@@ -47,6 +47,7 @@ function toPlivoFormat(e164: string): string {
 export const plivoProvider: SmsProvider = {
   name: "plivo",
   webhookMethod: "POST",
+  longMessage: { strategy: "passthrough" },
 
   validateConfig() {
     const required = ["PLIVO_AUTH_ID", "PLIVO_AUTH_TOKEN", "PLIVO_PHONE_NUMBER"];

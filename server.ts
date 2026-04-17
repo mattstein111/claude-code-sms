@@ -253,25 +253,53 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // No outbound gating — sends are always allowed. Inbound gating (blocklist,
       // disabled policy) still applies in the poll loop below.
 
-      const accessConfig = readAccess();
-      const chunks = chunk(text, accessConfig.textChunkLimit, accessConfig.chunkMode);
-
       try {
         let lastId: number = 0;
-        for (const chunkText of chunks) {
-          if (mediaUrls.length > 0 && chunkText === chunks[chunks.length - 1]) {
-            await provider.sendMMS(chatId, chunkText, mediaUrls);
+        let sentCount = 0;
+
+        if (mediaUrls.length > 0) {
+          // MMS with attached media: always a single send, regardless of text length.
+          await provider.sendMMS(chatId, text, mediaUrls);
+          lastId = insertOutbound(
+            chatId,
+            text,
+            mediaUrls.join(","),
+            provider.getFromNumber()
+          );
+          sentCount = 1;
+        } else {
+          // Text-only: route based on the provider's long-message strategy.
+          const longCfg = provider.longMessage;
+          const threshold = longCfg.threshold ?? 160;
+
+          if (longCfg.strategy === "passthrough" || text.length <= threshold) {
+            // Provider handles multipart SMS natively, OR the message fits one segment.
+            await provider.sendSMS(chatId, text);
+            lastId = insertOutbound(chatId, text, "", provider.getFromNumber());
+            sentCount = 1;
+          } else if (longCfg.strategy === "mms_fallback") {
+            // Provider caps sendSMS — route long messages through MMS (text-only).
+            await provider.sendMMS(chatId, text, []);
+            lastId = insertOutbound(chatId, text, "", provider.getFromNumber());
+            sentCount = 1;
           } else {
-            await provider.sendSMS(chatId, chunkText);
+            // strategy === "chunk" — last resort. DIY-splits into independent SMSes.
+            // Recipients may see fragmented, reordered messages.
+            const accessConfig = readAccess();
+            const chunks = chunk(text, threshold, accessConfig.chunkMode);
+            for (const chunkText of chunks) {
+              await provider.sendSMS(chatId, chunkText);
+              lastId = insertOutbound(chatId, chunkText, "", provider.getFromNumber());
+            }
+            sentCount = chunks.length;
           }
-          lastId = insertOutbound(chatId, chunkText, mediaUrls.join(","), provider.getFromNumber());
         }
 
         return {
           content: [
             {
               type: "text" as const,
-              text: `Sent ${chunks.length} message(s) to ${chatId} (id: ${lastId})`,
+              text: `Sent ${sentCount} message(s) to ${chatId} (id: ${lastId})`,
             },
           ],
         };

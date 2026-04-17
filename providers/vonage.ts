@@ -43,6 +43,7 @@ function getConfig() {
 export const vonageProvider: SmsProvider = {
   name: "vonage",
   webhookMethod: "POST",
+  longMessage: { strategy: "passthrough" },
 
   validateConfig() {
     const required = ["VONAGE_API_KEY", "VONAGE_API_SECRET", "VONAGE_PHONE_NUMBER"];

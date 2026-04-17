@@ -22,6 +22,18 @@
     "phone_format": "e164"
   },
 
+  "_long_message_comment": "How to handle messages longer than a single SMS segment. Options: 'passthrough' (default — let the provider handle multipart SMS natively; works for Twilio, Telnyx, Plivo, Sinch, MessageBird, Vonage, and most modern APIs), 'mms_fallback' (route long messages through the provider's MMS endpoint — required for voip.ms-style APIs that cap sendSMS at 160 chars without concatenation; requires the `mms` override block below), 'chunk' (last resort — DIY-splits into independent SMSes; recipients will see fragmented messages).",
+  "long_message_strategy": "passthrough",
+  "long_message_threshold": 160,
+
+  "_mms_comment": "Only required when long_message_strategy is 'mms_fallback' and the provider's MMS endpoint differs from its SMS endpoint. Fields here shallow-merge onto `send` when firing an MMS request (body keys merge rather than replace). voip.ms example: flip `body.method` from sendSMS to sendMMS and point `response_id_path` at the MMS id field in the response, while keeping url, auth, and other fields intact.",
+  "mms": {
+    "body": {
+      "method": "sendMMS"
+    },
+    "response_id_path": "mms"
+  },
+
   "webhook": {
     "method": "POST",
     "content_type": "json",
