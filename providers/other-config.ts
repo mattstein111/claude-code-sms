@@ -77,6 +77,28 @@ export interface SendConfig {
   phone_format?: PhoneFormat;
 }
 
+/**
+ * Shallow overrides applied on top of `send` when firing an MMS request.
+ * Used when the provider's MMS endpoint differs from its SMS endpoint
+ * (e.g. voip.ms: same URL, `body.method` flips from `sendSMS` → `sendMMS`).
+ * Any field present here replaces the same field in `send`; fields from
+ * `send.body` and `mms.body` are shallow-merged (mms wins).
+ */
+export interface MmsConfig {
+  url?: string;
+  method?: "GET" | "POST";
+  headers?: Record<string, string>;
+  body?: Record<string, unknown>;
+  body_format?: "json" | "form";
+  response_id_path?: string;
+}
+
+/**
+ * How to handle messages longer than a single SMS segment.
+ * See providers/interface.ts for a full description of each strategy.
+ */
+export type LongMessageStrategyName = "passthrough" | "mms_fallback" | "chunk";
+
 export interface WebhookConfig {
   /** HTTP method(s) for inbound webhooks. */
   method?: "GET" | "POST" | "GET|POST";
@@ -103,10 +125,36 @@ export interface OtherProviderConfig {
   from_number: string;
   /** Outbound send configuration. */
   send: SendConfig;
+  /**
+   * Optional overrides applied on top of `send` when firing an MMS request.
+   * Required when `long_message_strategy` is `"mms_fallback"` and the
+   * provider's MMS API differs from its SMS API.
+   */
+  mms?: MmsConfig;
   /** Inbound webhook configuration. */
   webhook?: WebhookConfig;
   /** Media fetch — null/absent = not supported. */
   fetch_media?: null;
+  /**
+   * How to handle messages longer than `long_message_threshold`.
+   * Default: `"passthrough"` (send the full body as-is; works for any
+   * provider whose API handles multipart SMS natively with UDH — Twilio,
+   * Telnyx, Plivo, Sinch, MessageBird, Vonage, etc.).
+   *
+   * Set `"mms_fallback"` for providers like voip.ms that cap sendSMS at
+   * 160 chars without concatenation but have a separate MMS API that
+   * accepts longer text. Requires an `mms` config block.
+   *
+   * Set `"chunk"` as a last resort — DIY-splits the body at
+   * `long_message_threshold` and sends each slice as an independent SMS.
+   * Recipients will see fragmented, possibly reordered messages.
+   */
+  long_message_strategy?: LongMessageStrategyName;
+  /**
+   * Max chars a single SMS segment may contain before
+   * `long_message_strategy` triggers. Default: 160.
+   */
+  long_message_threshold?: number;
 }
 
 // --- Config loading and validation ---
@@ -183,6 +231,30 @@ function validateConfig(config: OtherProviderConfig): void {
   if (config.send.phone_format && !VALID_PHONE_FORMATS.includes(config.send.phone_format)) {
     throw new Error(
       `other-provider.json: "send.phone_format" must be one of: ${VALID_PHONE_FORMATS.join(", ")}`
+    );
+  }
+
+  // Validate long_message_strategy if specified
+  const VALID_STRATEGIES: LongMessageStrategyName[] = ["passthrough", "mms_fallback", "chunk"];
+  if (
+    config.long_message_strategy &&
+    !VALID_STRATEGIES.includes(config.long_message_strategy)
+  ) {
+    throw new Error(
+      `other-provider.json: "long_message_strategy" must be one of: ${VALID_STRATEGIES.join(", ")}`
+    );
+  }
+  if (config.long_message_strategy === "mms_fallback" && !config.mms) {
+    throw new Error(
+      `other-provider.json: long_message_strategy "mms_fallback" requires an "mms" config block`
+    );
+  }
+  if (
+    config.long_message_threshold !== undefined &&
+    (typeof config.long_message_threshold !== "number" || config.long_message_threshold < 1)
+  ) {
+    throw new Error(
+      `other-provider.json: "long_message_threshold" must be a positive number`
     );
   }
 
@@ -398,6 +470,7 @@ function extractEnvRefs(config: OtherProviderConfig): string[] {
   }
 
   scan(config.send);
+  if (config.mms) scan(config.mms);
 
   // Also check auth env var references
   const auth = config.send.auth;

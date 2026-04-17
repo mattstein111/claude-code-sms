@@ -47,6 +47,7 @@ function apiBase(region: string, servicePlanId: string): string {
 export const sinchProvider: SmsProvider = {
   name: "sinch",
   webhookMethod: "POST",
+  longMessage: { strategy: "passthrough" },
 
   validateConfig() {
     const required = ["SINCH_SERVICE_PLAN_ID", "SINCH_API_TOKEN", "SINCH_PHONE_NUMBER"];

@@ -218,8 +218,7 @@ An `access.json` file is optional — the defaults (DM policy enabled, empty blo
 
 - `dmPolicy` — `"enabled"` (default) delivers all non-blocked inbound to Claude; `"disabled"` drops everything
 - `blockList` — numbers silently blocked (stored for audit, never delivered)
-- `textChunkLimit` — outbound messages longer than this are split into multiple texts
-- `chunkMode` — `"length"` for hard splits, `"newline"` to prefer paragraph breaks
+- `textChunkLimit` / `chunkMode` — legacy. Only consulted when a provider's long-message strategy is `"chunk"` (see "Long messages" below). Most providers handle long messages natively.
 
 The owner phone (from `.env`) always reaches Claude with full trust unless it's on the blocklist.
 
@@ -420,7 +419,7 @@ Claude Code gets three tools from this plugin:
 
 ### `send`
 
-Send an SMS or MMS message to a phone number. Outbound sends are always allowed. Messages longer than `textChunkLimit` (default 160) are automatically split into multiple texts.
+Send an SMS or MMS message to a phone number. Outbound sends are always allowed. How long messages are handled depends on the provider's `longMessage.strategy` — see [Long messages](#long-messages).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -595,8 +594,36 @@ Phone numbers arrive as E.164 (`+14165551234`). Your provider module converts to
 - **Claude Code channels are a research preview** (launched March 2026). There are known upstream bugs where notifications can be silently dropped when the session is idle, or duplicate plugin instances can be spawned. These are Claude Code issues, not plugin bugs.
 - **Webhook reliability** — if the listener process is down when a provider fires a webhook, that message is lost. Most providers do not retry. The systemd service with auto-restart mitigates this.
 - **Outbound MMS** requires that media URLs are publicly accessible on the internet — the SMS provider fetches the media from the URL you provide. This plugin does not host or proxy files.
-- **Long messages** are chunked at 160 characters by default (the standard SMS segment size). This is configurable via `textChunkLimit` in `access.json`.
+- **Long messages** — see [Long messages](#long-messages) below.
 - **Dedicated providers** (Twilio, Vonage, Telnyx, Plivo, MessageBird, Sinch) are implemented based on API documentation but have not been tested with live accounts. The generic provider has been tested with voip.ms. See [GitHub issues](https://github.com/mattstein111/claude-code-sms/issues) for testing status.
+
+---
+
+## Long messages
+
+A single SMS segment holds ~160 GSM-7 chars (70 UCS-2). Messages that exceed this are handled per the provider's `longMessage.strategy`:
+
+| Strategy | When | What it does | Who uses it |
+|---|---|---|---|
+| `passthrough` | Provider's SMS API handles multipart SMS natively (proper UDH concatenation, recipient reassembles) | Full body passed to sendSMS in one call | Twilio, Telnyx, Plivo, Sinch, MessageBird, Vonage, most modern APIs — this is the default for the generic `other` provider |
+| `mms_fallback` | Provider caps sendSMS at 160 chars with no concatenation, but has a separate MMS API that accepts longer text | Messages `> threshold` are sent via the provider's MMS endpoint as text-only MMS (up to ~1600 chars) | voip.ms |
+| `chunk` | Last resort; provider supports neither long SMS nor text-only MMS | DIY-splits the body at `threshold` and sends each slice as an independent SMS. **Recipients will see fragmented, potentially reordered messages.** | None of the built-in providers |
+
+Built-in providers declare their strategy in the `SmsProvider` object. The generic `other` provider reads from the config file:
+
+```json
+{
+  "long_message_strategy": "mms_fallback",
+  "long_message_threshold": 160,
+  "mms": {
+    "body": { "method": "sendMMS" }
+  }
+}
+```
+
+When `long_message_strategy` is `mms_fallback`, the `mms` block shallow-merges onto `send` before firing — useful when the same endpoint handles both SMS and MMS and only a field or two differ (voip.ms flips `body.method`).
+
+MMS with actual media attachments always goes through `sendMMS` regardless of strategy.
 
 ---
 

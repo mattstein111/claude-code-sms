@@ -14,7 +14,12 @@
  * Status: NEW — requires testing with specific provider configurations.
  */
 
-import type { SmsProvider, InboundMessage, SendResult } from "./interface";
+import type {
+  SmsProvider,
+  InboundMessage,
+  LongMessageConfig,
+  SendResult,
+} from "./interface";
 import {
   loadConfig,
   resolveTemplate,
@@ -23,6 +28,7 @@ import {
   getByPath,
   buildAuthHeaders,
 } from "./other-config";
+import type { MmsConfig, SendConfig } from "./other-config";
 import { constantTimeEquals } from "../crypto";
 
 export const otherProvider: SmsProvider = {
@@ -34,21 +40,43 @@ export const otherProvider: SmsProvider = {
     return loadConfig().webhook?.method || "POST";
   },
 
+  get longMessage(): LongMessageConfig {
+    const config = loadConfig();
+    return {
+      strategy: config.long_message_strategy || "passthrough",
+      threshold: config.long_message_threshold ?? 160,
+    };
+  },
+
   validateConfig(): void {
     // loadConfig() performs full validation and throws descriptive errors
     loadConfig();
   },
 
   async sendSMS(to: string, message: string): Promise<SendResult> {
-    return send(to, message, []);
+    return send(to, message, [], /* asMms */ false);
   },
 
   async sendMMS(to: string, message: string, mediaUrls: string[]): Promise<SendResult> {
     const config = loadConfig();
-    if (!config.send.mms_media_field) {
+    const hasMediaField = !!config.send.mms_media_field;
+    const hasMmsOverrides = !!config.mms;
+
+    if (mediaUrls.length === 0) {
+      // Text-only MMS — only valid when an `mms` override block declares a
+      // distinct MMS endpoint (used by the `mms_fallback` long-message strategy).
+      if (!hasMmsOverrides) {
+        throw new Error(
+          `${config.name}: text-only MMS requires an "mms" override block in other-provider.json`
+        );
+      }
+      return send(to, message, [], /* asMms */ true);
+    }
+
+    if (!hasMediaField && !hasMmsOverrides) {
       throw new Error(`${config.name}: MMS not supported (no mms_media_field configured)`);
     }
-    return send(to, message, mediaUrls);
+    return send(to, message, mediaUrls, /* asMms */ true);
   },
 
   async parseWebhook(req: Request): Promise<InboundMessage | null> {
@@ -141,15 +169,39 @@ export const otherProvider: SmsProvider = {
 // --- Helpers ---
 
 /**
+ * Shallow-merge `mms` overrides on top of `send`. Fields present on mms
+ * replace the corresponding send field; `body` is merged key-by-key so a
+ * config only needs to declare the keys it wants to change (e.g. voip.ms
+ * only flips `body.method`).
+ */
+function effectiveSendConfig(base: SendConfig, overrides: MmsConfig | undefined): SendConfig {
+  if (!overrides) return base;
+  return {
+    ...base,
+    ...(overrides.url !== undefined ? { url: overrides.url } : {}),
+    ...(overrides.method !== undefined ? { method: overrides.method } : {}),
+    ...(overrides.body_format !== undefined ? { body_format: overrides.body_format } : {}),
+    ...(overrides.response_id_path !== undefined
+      ? { response_id_path: overrides.response_id_path }
+      : {}),
+    headers: { ...(base.headers || {}), ...(overrides.headers || {}) },
+    body: { ...(base.body || {}), ...(overrides.body || {}) },
+  };
+}
+
+/**
  * Build and send an outbound request based on config.
+ * When `asMms` is true and the config has an `mms` override block,
+ * overrides are shallow-merged onto `send` before firing.
  */
 async function send(
   to: string,
   message: string,
-  mediaUrls: string[]
+  mediaUrls: string[],
+  asMms: boolean
 ): Promise<SendResult> {
   const config = loadConfig();
-  const send = config.send;
+  const send = asMms ? effectiveSendConfig(config.send, config.mms) : config.send;
   const phoneFormat = send.phone_format || "e164";
 
   const vars: Record<string, string> = {

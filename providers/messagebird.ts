@@ -106,6 +106,7 @@ function validateJwtSignature(
 export const messagebirdProvider: SmsProvider = {
   name: "messagebird",
   webhookMethod: "POST",
+  longMessage: { strategy: "passthrough" },
 
   validateConfig() {
     const required = ["MESSAGEBIRD_ACCESS_KEY", "MESSAGEBIRD_PHONE_NUMBER"];

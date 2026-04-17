@@ -65,6 +65,7 @@ function verifyTelnyxSignature(
 export const telnyxProvider: SmsProvider = {
   name: "telnyx",
   webhookMethod: "POST",
+  longMessage: { strategy: "passthrough" },
 
   validateConfig() {
     const required = ["TELNYX_API_KEY", "TELNYX_PHONE_NUMBER"];
