@@ -161,6 +161,8 @@ These providers have been tested or documented for use with the generic provider
 
 The dedicated providers (Twilio, Vonage, etc.) can also be used via the generic provider if you prefer simplicity over signature validation — just use `SMS_PROVIDER=other` with the appropriate type preset.
 
+**Got a working config for a provider not listed here?** We want to grow this table. Open a [GitHub issue](https://github.com/mattstein111/claude-code-sms/issues) or PR with your `other-provider.json` config (redact credentials) and we'll add it to the known configurations.
+
 Want to add a dedicated provider with signature validation? See [Contributing a Provider](#contributing-a-provider).
 
 ---
@@ -175,9 +177,25 @@ cd claude-code-sms
 bun install
 ```
 
-### 2. Configure
+> **Important — Bun PATH:** Claude Code spawns the MCP server in a non-interactive shell. If your `bun` PATH export is below the non-interactive guard in `~/.bashrc` (the `case $- in *i*) ;; *) return;; esac` pattern), `bun` won't be found and the server will silently fail to start. Make sure the Bun PATH export is in `~/.profile` or `~/.bash_profile`, or above the guard in `~/.bashrc`. On macOS with zsh this is typically not an issue.
 
-The fastest path is the built-in skill — run `/sms:configure` inside a Claude Code session and it will walk you through everything interactively.
+### 2. Register the plugin with Claude Code
+
+The plugin must be registered as a marketplace and installed before Claude Code will load it. From inside the cloned directory:
+
+```bash
+# Add the local repo as a plugin marketplace
+claude plugin marketplace add .
+
+# Install the plugin (user scope = available in all sessions)
+claude plugin install sms
+```
+
+**Restart Claude Code after installing.** The plugin's skills (`/sms:configure`, `/sms:access`) and MCP tools won't appear until the next session.
+
+### 3. Configure
+
+The fastest path is the built-in skill — run `/sms:configure` inside a Claude Code session and it will walk you through everything interactively. (This requires the plugin to be installed per step 2.)
 
 To configure manually, first create the state directory:
 
@@ -203,7 +221,7 @@ Finally, set the file permissions:
 chmod 600 ~/.claude/channels/sms/.env
 ```
 
-### 3. Set up access control
+### 4. Set up access control
 
 An `access.json` file is optional — the defaults (DM policy enabled, empty blocklist) work out of the box. Create `~/.claude/channels/sms/access.json` only if you want to customize:
 
@@ -222,7 +240,7 @@ An `access.json` file is optional — the defaults (DM policy enabled, empty blo
 
 The owner phone (from `.env`) always reaches Claude with full trust unless it's on the blocklist.
 
-### 4. Start the webhook listener
+### 5. Start the webhook listener
 
 The listener must be running to receive inbound SMS. You can run it directly for testing:
 
@@ -239,11 +257,11 @@ systemctl --user daemon-reload
 systemctl --user enable --now sms-listener
 ```
 
-### 5. Expose the listener to the internet
+### 6. Expose the listener to the internet
 
 Your SMS provider needs to reach the webhook listener. Set up a tunnel (Cloudflare Tunnel, ngrok, etc.) pointing to `localhost:5090` (or whatever `LISTEN_PORT` you configured).
 
-### 6. Configure your provider's webhook
+### 7. Configure your provider's webhook
 
 In your SMS provider's portal, set the inbound message webhook URL to:
 
@@ -253,9 +271,9 @@ https://your-tunnel.com/<SMS_WEBHOOK_PATH>?token=<SMS_WEBHOOK_TOKEN>
 
 The exact location of this setting varies by provider — see the provider-specific notes in [Provider Configuration](#provider-configuration).
 
-### 7. Use it
+### 8. Use it
 
-The plugin auto-registers via `.claude-plugin/plugin.json` when Claude Code runs in this project directory. Start Claude Code, and send a text to your number — Claude will see it as a channel notification.
+Start a new Claude Code session (any directory — the plugin is installed globally). Send a text to your number and Claude will see it as a channel notification. You can also run `/sms:configure` to verify the setup or `/sms:access` to manage the allowlist.
 
 ---
 
@@ -586,6 +604,49 @@ To add a new provider:
 Phone numbers arrive as E.164 (`+14165551234`). Your provider module converts to whatever format the API expects (e.g., Plivo strips the `+`, Twilio uses E.164 as-is).
 
 > **Note:** Before writing a dedicated provider, check whether the generic provider (`SMS_PROVIDER=other`) can handle your use case. Dedicated providers are only needed when the provider has a bespoke webhook signature scheme that can't be expressed as simple token validation.
+
+### Sharing a generic provider config
+
+If you've tested a generic provider configuration that works, please contribute it back so others don't have to figure it out from scratch:
+
+1. **Open an issue** with the provider name, the `type` preset you used, and your `other-provider.json` (with credentials redacted)
+2. **Or submit a PR** adding the provider to the "Known working configurations" table above, optionally with an example config in the docs
+
+Even a "confirmed working" update for an existing entry in the table is valuable — most are currently marked "No" under Tested.
+
+---
+
+## Troubleshooting
+
+<details>
+<summary><strong>MCP server silently fails to start</strong></summary>
+
+Claude Code spawns the MCP server in a non-interactive shell. If `bun` isn't on the PATH in that context, the server fails with no visible error.
+
+**Check:** Run `bash -c 'which bun'` (note: not an interactive shell). If it prints nothing, your Bun PATH export is below the non-interactive guard in `~/.bashrc`.
+
+**Fix:** Move the Bun PATH export to `~/.profile` or `~/.bash_profile`, or above the `case $- in *i*) ;; *) return;; esac` guard in `~/.bashrc`. Then start a new Claude Code session.
+</details>
+
+<details>
+<summary><strong>Skills don't appear after <code>claude plugin install</code></strong></summary>
+
+The plugin's skills (`/sms:configure`, `/sms:access`) and MCP tools are only loaded at session startup. After installing or updating the plugin, fully restart Claude Code.
+</details>
+
+<details>
+<summary><strong><code>claude plugin install sms</code> can't find the plugin</strong></summary>
+
+The plugin must be registered as a marketplace first:
+
+```bash
+cd /path/to/claude-code-sms
+claude plugin marketplace add .
+claude plugin install sms
+```
+
+Run `claude plugin marketplace list` to verify the marketplace was added.
+</details>
 
 ---
 

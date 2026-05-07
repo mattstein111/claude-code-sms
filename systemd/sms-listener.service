@@ -9,7 +9,7 @@
 #   journalctl --user -u sms-listener -f
 #   Also writes to ~/.claude/channels/sms/logs/listener.log
 #
-# Requires: Bun runtime, Cloudflare tunnel pointing to LISTEN_PORT
+# Requires: Bun runtime, and a tunnel (Cloudflare, ngrok, etc.) exposing LISTEN_PORT to the internet
 
 [Unit]
 Description=SMS Webhook Listener for Claude Code
