@@ -273,7 +273,7 @@ The exact location of this setting varies by provider — see the provider-speci
 
 ### 8. Use it
 
-Start a new Claude Code session (any directory — the plugin is installed globally). Send a text to your number and Claude will see it as a channel notification. You can also run `/sms:configure` to verify the setup or `/sms:access` to manage the allowlist.
+Start a new Claude Code session (any directory — the plugin is installed globally). Send a text to your number and Claude will see it as a channel notification. You can also run `/sms:configure` to verify the setup or `/sms:access` to manage the blocklist and DM policy.
 
 ---
 
